@@ -1,5 +1,5 @@
 // Service worker simples: rede primeiro para a página, cache primeiro para assets.
-const CACHE = 'worship-pad-v1';
+const CACHE = 'worship-pad-v2';
 
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (e) => {

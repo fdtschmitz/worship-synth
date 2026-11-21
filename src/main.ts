@@ -172,6 +172,7 @@ app.innerHTML = `
     <span id="now" class="now">—</span>
     <button id="open-settings" class="ghost" aria-label="Configurações">⚙︎</button>
   </footer>
+  <p class="credit">Created by fdtschmitz - 2026</p>
   <div id="sheet" class="sheet" hidden>
     <div class="sheet-panel">
       <div class="sheet-head"><h2>Configurações</h2><button id="close-settings" class="ghost">Fechar</button></div>

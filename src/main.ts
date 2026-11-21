@@ -1,6 +1,7 @@
 import './style.css';
 import { PadEngine, type PadSettings } from './audio';
 import { CHORDS, NOTE_NAMES, SPECIAL_TYPES, chordLabel, padVoicing, type ChordType } from './chords';
+import { TIMBRES, timbreById } from './timbres';
 
 type Tab = 'maj' | 'min' | 'special' | 'seq';
 interface Step {
@@ -26,6 +27,7 @@ const save = (k: string, v: unknown) => {
 };
 
 const settings: PadSettings = load('settings', {
+  timbre: 'classic',
   fadeIn: 3,
   fadeOut: 3,
   volume: 0.8,
@@ -70,8 +72,47 @@ document.addEventListener('visibilitychange', () => {
 // ---------- Lógica de toggle ----------
 const keyOf = (s: Step) => `${s.root}:${s.type}`;
 
+// ---------- Amostras (carregadas sob demanda) ----------
+let loadingText: string | null = null;
+
+/** Garante que as amostras do timbre atual estão carregadas. */
+async function prepareSamples() {
+  if (!timbreById(settings.timbre).samples || engine.samplesReady) return;
+  loadingText = 'Carregando…';
+  refreshActive();
+  try {
+    await engine.ensureSamples((done, total) => {
+      loadingText = `Carregando ${done}/${total}`;
+      refreshActive();
+    });
+  } catch (err) {
+    console.error(err);
+    alert('Não foi possível carregar as amostras. Verifique a conexão.\nUsando “Cordas etéreas” no lugar.');
+    await setTimbre('strings');
+  } finally {
+    loadingText = null;
+    refreshActive();
+    renderTimbres();
+  }
+}
+
+async function setTimbre(id: string) {
+  engine.update({ timbre: id });
+  save('settings', settings);
+  renderTimbres();
+  await prepareSamples();
+  // Se algo está tocando, faz crossfade do mesmo acorde para o novo timbre.
+  if (activeKey && settings.timbre === id) {
+    const [r, t] = activeKey.split(':');
+    const { body, shimmer } = padVoicing(Number(r), t as ChordType);
+    engine.stop(activeKey);
+    engine.start(activeKey, body, shimmer);
+  }
+}
+
 async function toggle(step: Step) {
   await engine.unlock();
+  await prepareSamples();
   const key = keyOf(step);
   if (activeKey === key) {
     engine.stop(key);
@@ -115,6 +156,9 @@ app.innerHTML = `
   <div id="sheet" class="sheet" hidden>
     <div class="sheet-panel">
       <div class="sheet-head"><h2>Configurações</h2><button id="close-settings" class="ghost">Fechar</button></div>
+      <div class="field-label">Timbre</div>
+      <div class="chips" id="timbres"></div>
+      <p class="hint" id="timbre-hint" hidden></p>
       <div id="sliders"></div>
     </div>
   </div>
@@ -187,7 +231,9 @@ function refreshActive() {
   });
   document.documentElement.style.setProperty('--fade-in', `${settings.fadeIn}s`);
   document.documentElement.style.setProperty('--fade-out', `${settings.fadeOut}s`);
-  if (activeKey) {
+  if (loadingText) {
+    $('#now').textContent = loadingText;
+  } else if (activeKey) {
     const [r, t] = activeKey.split(':');
     $('#now').textContent = chordLabel(Number(r), t as ChordType);
   } else $('#now').textContent = '—';
@@ -268,7 +314,8 @@ document.addEventListener('dblclick', (e) => e.preventDefault(), { passive: fals
 $('#stop').addEventListener('click', stopAll);
 
 // ---------- Configurações ----------
-const sliderDefs: { key: keyof PadSettings; label: string; min: number; max: number; step: number; fmt: (v: number) => string }[] = [
+type NumericSetting = Exclude<keyof PadSettings, 'timbre'>;
+const sliderDefs: { key: NumericSetting; label: string; min: number; max: number; step: number; fmt: (v: number) => string }[] = [
   { key: 'fadeIn', label: 'Fade in', min: 0, max: 15, step: 0.5, fmt: (v) => `${v.toFixed(1)} s` },
   { key: 'fadeOut', label: 'Fade out', min: 0, max: 15, step: 0.5, fmt: (v) => `${v.toFixed(1)} s` },
   { key: 'volume', label: 'Volume', min: 0, max: 1, step: 0.01, fmt: (v) => `${Math.round(v * 100)}%` },
@@ -276,6 +323,33 @@ const sliderDefs: { key: keyof PadSettings; label: string; min: number; max: num
   { key: 'reverb', label: 'Reverb', min: 0, max: 1, step: 0.01, fmt: (v) => `${Math.round(v * 100)}%` },
   { key: 'shimmer', label: 'Shimmer', min: 0, max: 1, step: 0.01, fmt: (v) => `${Math.round(v * 100)}%` },
 ];
+
+function renderTimbres() {
+  $('#timbres').innerHTML = TIMBRES.map(
+    (t) =>
+      `<button class="chip ${t.id === settings.timbre ? 'on' : ''}" data-timbre="${t.id}">${t.name}${t.warning ? ' <span class="warn-mark">⚠︎</span>' : ''}</button>`,
+  ).join('');
+  const t = timbreById(settings.timbre);
+  const hint = $('#timbre-hint');
+  hint.hidden = !t.warning;
+  if (t.warning) {
+    const mb = engine.samplesBytes / 1e6;
+    hint.textContent = `⚠︎ ${t.warning}${mb ? ` Em uso agora: ${Math.round(mb)} MB.` : ''}`;
+  }
+}
+
+$('#timbres').addEventListener('click', async (e) => {
+  const b = (e.target as HTMLElement).closest<HTMLElement>('[data-timbre]');
+  const id = b?.dataset.timbre;
+  if (!id || id === settings.timbre) return;
+  const t = timbreById(id);
+  if (t.warning && !localStorage.getItem('samplesWarned')) {
+    if (!confirm(`${t.warning}\n\nDeseja continuar?`)) return;
+    save('samplesWarned', true);
+  }
+  await engine.unlock(); // ainda dentro do gesto do usuário
+  await setTimbre(id);
+});
 
 $('#sliders').innerHTML = sliderDefs
   .map(
@@ -288,7 +362,7 @@ $('#sliders').innerHTML = sliderDefs
 
 $('#sliders').addEventListener('input', (e) => {
   const input = e.target as HTMLInputElement;
-  const key = input.dataset.key as keyof PadSettings;
+  const key = input.dataset.key as NumericSetting;
   const def = sliderDefs.find((d) => d.key === key)!;
   const v = Number(input.value);
   engine.update({ [key]: v });
@@ -341,6 +415,7 @@ picker.addEventListener('click', (e) => {
   }
 });
 
+renderTimbres();
 render();
 
 if (import.meta.env.PROD && 'serviceWorker' in navigator) {

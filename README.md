@@ -14,8 +14,13 @@ npm run build     # gera /dist (estático, pode ser hospedado em qualquer lugar 
 
 - `src/audio.ts`: motor de som (osciladores desafinados, filtro com LFO, camada shimmer, reverb por convolução, fades equal-power)
 - `src/chords.ts`: tipos de acorde e voicings
+- `src/timbres.ts`: definição dos timbres (Pad clássico, Cordas etéreas, Atmosfera, Orquestra)
+- `src/samples.ts`: carregamento das amostras gravadas e loop sem emenda
 - `src/main.ts`: interface (abas, grade de 12 pads, sequência, configurações)
 - `public/`: manifest, ícone e service worker (offline)
+- `public/samples/strings/`: amostras de cordas do VSCO 2 CE (CC0), usadas pelo timbre "Orquestra". Veja `scripts/samples/` para regerar.
+
+O timbre "Orquestra (amostras)" é opcional: baixa cerca de 1,5 MB na primeira vez e ocupa cerca de 40 MB de memória enquanto está selecionado. Os outros timbres são sintetizados e não carregam nada.
 
 ## Observações para celular
 

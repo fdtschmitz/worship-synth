@@ -1,6 +1,9 @@
 import { midiToHz } from './chords';
+import { loadStrings, nearest, type SampleSet } from './samples';
+import { timbreById, type Layer, type Timbre } from './timbres';
 
 export interface PadSettings {
+  timbre: string; // id em TIMBRES
   fadeIn: number; // segundos
   fadeOut: number; // segundos
   volume: number; // 0..1
@@ -33,7 +36,7 @@ function fade(ctx: AudioContext, param: AudioParam, target: number, seconds: num
 }
 
 class Voice {
-  private oscs: OscillatorNode[] = [];
+  private oscs: AudioScheduledSourceNode[] = [];
   readonly env: GainNode;
   readonly filter: BiquadFilterNode;
   readonly shimmerGain: GainNode;
@@ -44,66 +47,125 @@ class Voice {
     dest: AudioNode,
     body: number[],
     shimmer: number[],
-    s: PadSettings,
+    private s: PadSettings,
+    readonly timbre: Timbre,
+    samples: SampleSet | null,
   ) {
     this.env = ctx.createGain();
     this.env.gain.value = 0;
     this.env.connect(dest);
 
+    const hp = ctx.createBiquadFilter();
+    hp.type = 'highpass';
+    hp.frequency.value = timbre.highpass;
+    hp.Q.value = 0.5;
+    hp.connect(this.env);
+
     this.filter = ctx.createBiquadFilter();
     this.filter.type = 'lowpass';
-    this.filter.Q.value = 0.6;
-    this.filter.frequency.value = cutoffFor(s.brightness);
-    this.filter.connect(this.env);
+    this.filter.Q.value = timbre.filterQ;
+    this.filter.frequency.value = this.cutoff();
+    this.filter.connect(hp);
 
     // LFO lento no filtro: dá "respiração" ao pad.
-    const lfo = ctx.createOscillator();
-    lfo.frequency.value = 0.11;
-    const lfoDepth = ctx.createGain();
-    lfoDepth.gain.value = 180;
-    lfo.connect(lfoDepth).connect(this.filter.frequency);
-    lfo.start();
-    this.oscs.push(lfo);
+    this.lfo(timbre.filterLfo.rate, timbre.filterLfo.depth, [this.filter.frequency]);
 
     const bodyBus = ctx.createGain();
-    bodyBus.gain.value = 0.32 / Math.sqrt(body.length);
+    bodyBus.gain.value = timbre.bodyGain / Math.sqrt(body.length);
     bodyBus.connect(this.filter);
-
-    for (const note of body) {
-      const f = midiToHz(note);
-      // Duas serras desafinadas (coro) + um triângulo para corpo.
-      for (const [type, detune, g] of [
-        ['sawtooth', -9, 0.5],
-        ['sawtooth', 9, 0.5],
-        ['triangle', 0, 0.7],
-      ] as const) {
-        this.addOsc(type, f, detune + (Math.random() * 4 - 2), g, bodyBus);
-      }
-    }
+    if (samples) for (const note of body) this.addSample(samples, note, bodyBus);
+    else for (const layer of timbre.body) this.addLayer(layer, body, bodyBus);
 
     this.shimmerGain = ctx.createGain();
     this.shimmerGain.gain.value = s.shimmer * 0.09;
-    this.shimmerGain.connect(this.env); // sem filtro: brilho no topo
-    for (const note of shimmer) {
-      this.addOsc('sine', midiToHz(note), 0, 0.5, this.shimmerGain);
-      this.addOsc('sine', midiToHz(note), 6, 0.3, this.shimmerGain);
+    if (timbre.shimmerCutoff) {
+      const lp = ctx.createBiquadFilter();
+      lp.type = 'lowpass';
+      lp.frequency.value = timbre.shimmerCutoff;
+      lp.Q.value = 0.5;
+      this.shimmerGain.connect(lp).connect(hp);
+    } else {
+      this.shimmerGain.connect(hp);
     }
+    if (samples) for (const note of shimmer) this.addSample(samples, note, this.shimmerGain, 4);
+    else for (const layer of timbre.shimmer) this.addLayer(layer, shimmer, this.shimmerGain);
   }
 
-  private addOsc(type: OscillatorType, freq: number, detune: number, gain: number, dest: AudioNode) {
+  /** Toca a amostra mais próxima, transposta para a nota, em loop. */
+  private addSample(set: SampleSet, note: number, dest: AudioNode, gain = 1) {
+    const i = nearest(set, note);
+    const src = this.ctx.createBufferSource();
+    src.buffer = set.buffers[i];
+    src.playbackRate.value = Math.pow(2, (note - set.notes[i]) / 12);
+    src.loop = true;
+    src.loopStart = set.loopStart;
+    src.loopEnd = set.loopEnd[i];
+    let out: AudioNode = src;
+    if (gain !== 1) {
+      const g = this.ctx.createGain();
+      g.gain.value = gain;
+      out = src.connect(g);
+    }
+    out.connect(dest);
+    // Início em pontos diferentes: notas que usam a mesma amostra não ficam em fase.
+    src.start(this.ctx.currentTime, Math.random() * 0.6);
+    this.oscs.push(src);
+  }
+
+  cutoff() {
+    return cutoffFor(this.s.brightness) * this.timbre.cutoffScale;
+  }
+
+  private lfo(rate: number, depth: number, targets: AudioParam[]) {
     const o = this.ctx.createOscillator();
-    o.type = type;
-    o.frequency.value = freq;
-    o.detune.value = detune;
+    o.frequency.value = rate;
     const g = this.ctx.createGain();
-    g.gain.value = gain;
-    o.connect(g).connect(dest);
-    o.start(this.ctx.currentTime + Math.random() * 0.02);
+    g.gain.value = depth;
+    o.connect(g);
+    for (const t of targets) g.connect(t);
+    o.start(this.ctx.currentTime + Math.random() * 0.5);
     this.oscs.push(o);
+  }
+
+  private addLayer(layer: Layer, notes: number[], dest: AudioNode) {
+    const g = this.ctx.createGain();
+    g.gain.value = layer.gain / Math.sqrt(layer.voices);
+    g.connect(dest);
+
+    // Vibrato de naipe: 3 LFOs com velocidades ligeiramente diferentes,
+    // distribuídos entre os osciladores (cada "músico" oscila do seu jeito).
+    const vibTargets: AudioParam[][] = layer.vibrato ? [[], [], []] : [];
+    const shift = (layer.octave ?? 0) * 1200;
+    let n = 0;
+    for (const note of notes) {
+      const f = midiToHz(note);
+      for (let v = 0; v < layer.voices; v++) {
+        const o = this.ctx.createOscillator();
+        o.type = layer.wave;
+        o.frequency.value = f;
+        const spreadPos = layer.voices === 1 ? 0 : v / (layer.voices - 1) - 0.5;
+        o.detune.value = shift + spreadPos * layer.spread + (Math.random() * 4 - 2);
+        o.connect(g);
+        o.start(this.ctx.currentTime + Math.random() * 0.02);
+        this.oscs.push(o);
+        if (layer.vibrato) vibTargets[n++ % 3].push(o.detune);
+      }
+    }
+    if (layer.vibrato) {
+      const { rate, depth } = layer.vibrato;
+      vibTargets.forEach((targets, i) => this.lfo(rate * (0.88 + i * 0.12), depth, targets));
+    }
   }
 
   fadeIn(seconds: number) {
     fade(this.ctx, this.env.gain, 1, seconds);
+    if (this.timbre.swell) {
+      // Ataque de arco: o filtro abre do escuro até o brilho configurado.
+      const now = this.ctx.currentTime;
+      const c = this.cutoff();
+      this.filter.frequency.setValueAtTime(c * 0.3, now);
+      this.filter.frequency.exponentialRampToValueAtTime(c, now + Math.max(0.05, seconds));
+    }
   }
 
   fadeOut(seconds: number, onDone: () => void) {
@@ -185,20 +247,57 @@ export class PadEngine {
     this.wet.gain.setTargetAtTime(this.s.reverb * 1.2, t, 0.05);
   }
 
+  private samples: Promise<SampleSet> | null = null;
+  private loadedSamples: SampleSet | null = null;
+
+  /** Baixa e decodifica as amostras (uma vez). Exige unlock() antes. */
+  ensureSamples(onProgress?: (done: number, total: number) => void): Promise<SampleSet> {
+    if (!this.ctx) throw new Error('AudioContext não iniciado');
+    if (!this.samples) {
+      this.samples = loadStrings(this.ctx, onProgress).then(
+        (set) => (this.loadedSamples = set),
+        (err) => {
+          this.samples = null;
+          throw err;
+        },
+      );
+    }
+    return this.samples;
+  }
+
+  get samplesReady() {
+    return this.loadedSamples !== null;
+  }
+
+  get samplesBytes() {
+    return this.loadedSamples?.bytes ?? 0;
+  }
+
   update(s: Partial<PadSettings>) {
     Object.assign(this.s, s);
+    // Saiu do timbre com amostras: libera a memória (vozes que ainda estão
+    // em fade out mantêm seus buffers até terminar).
+    if ('timbre' in s && !timbreById(this.s.timbre).samples) {
+      this.samples = null;
+      this.loadedSamples = null;
+    }
     if (!this.ctx) return;
     this.applyMix();
     const t = this.ctx.currentTime;
     for (const v of this.active.values()) {
-      v.filter.frequency.setTargetAtTime(cutoffFor(this.s.brightness), t, 0.1);
-      v.shimmerGain.gain.setTargetAtTime(this.s.shimmer * 0.09, t, 0.1);
+      if ('brightness' in s) {
+        v.filter.frequency.cancelScheduledValues(t);
+        v.filter.frequency.setTargetAtTime(v.cutoff(), t, 0.1);
+      }
+      if ('shimmer' in s) v.shimmerGain.gain.setTargetAtTime(this.s.shimmer * 0.09, t, 0.1);
     }
   }
 
   start(key: string, body: number[], shimmer: number[]) {
     if (!this.ctx || this.active.has(key)) return;
-    const v = new Voice(this.ctx, this.bus, body, shimmer, this.s);
+    const timbre = timbreById(this.s.timbre);
+    if (timbre.samples && !this.loadedSamples) return; // main aguarda ensureSamples()
+    const v = new Voice(this.ctx, this.bus, body, shimmer, this.s, timbre, timbre.samples ? this.loadedSamples : null);
     this.active.set(key, v);
     v.fadeIn(this.s.fadeIn);
   }

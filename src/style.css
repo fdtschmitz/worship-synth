@@ -1,0 +1,279 @@
+:root {
+  --bg: #0b0d12;
+  --panel: #151922;
+  --pad: #1b202b;
+  --pad-border: #2a3140;
+  --text: #e8ecf3;
+  --muted: #8a93a6;
+  --accent: #7cc4ff;
+  --accent-2: #b48cff;
+  --fade-in: 3s;
+  --fade-out: 3s;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  overscroll-behavior: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  touch-action: manipulation;
+  cursor: pointer;
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  max-width: 720px;
+  margin: 0 auto;
+}
+
+/* ---------- Abas ---------- */
+.top {
+  padding: 10px 12px 6px;
+}
+.tabs {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 4px;
+  background: var(--panel);
+  border-radius: 12px;
+  padding: 4px;
+}
+.tabs button {
+  border: 0;
+  background: transparent;
+  padding: 10px 2px;
+  border-radius: 9px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--muted);
+}
+.tabs button.on {
+  background: var(--pad);
+  color: var(--text);
+  box-shadow: 0 1px 0 #ffffff10 inset;
+}
+
+main {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* ---------- Grade de pads ---------- */
+.grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+}
+@media (orientation: landscape) and (min-aspect-ratio: 4/3) {
+  .grid {
+    grid-template-columns: repeat(6, 1fr);
+  }
+}
+.grid.small {
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+}
+
+.pad {
+  position: relative;
+  aspect-ratio: 1;
+  border-radius: 16px;
+  border: 1px solid var(--pad-border);
+  background: var(--pad);
+  font-size: clamp(20px, 6vw, 30px);
+  font-weight: 700;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  isolation: isolate;
+  transition: transform 0.08s;
+}
+.pad:active {
+  transform: scale(0.96);
+}
+/* Brilho que acompanha o fade (in/out) configurado */
+.pad::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: radial-gradient(circle at 50% 40%, var(--accent) 0%, var(--accent-2) 60%, transparent 100%);
+  opacity: 0;
+  transition: opacity var(--fade-out) ease-out;
+}
+.pad.active {
+  border-color: var(--accent);
+  color: #0b0d12;
+}
+.pad.active::before {
+  opacity: 1;
+  transition: opacity var(--fade-in) ease-in;
+}
+.grid.small .pad {
+  font-size: 18px;
+  border-radius: 12px;
+}
+.pad small {
+  position: absolute;
+  top: 6px;
+  left: 9px;
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 600;
+}
+.pad.step.cursor {
+  outline: 2px dashed var(--accent);
+  outline-offset: 2px;
+}
+.pad.flash {
+  border-color: var(--accent);
+}
+
+/* ---------- Chips / ações ---------- */
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.chip {
+  border: 1px solid var(--pad-border);
+  background: var(--panel);
+  border-radius: 999px;
+  padding: 7px 14px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--muted);
+}
+.chip.on {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.seq-actions {
+  display: flex;
+  gap: 8px;
+}
+.seq-actions button {
+  flex: 1;
+}
+.ghost,
+.primary {
+  border: 1px solid var(--pad-border);
+  background: var(--panel);
+  border-radius: 12px;
+  padding: 12px 10px;
+  font-size: 15px;
+  font-weight: 600;
+}
+.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #0b0d12;
+}
+button:disabled {
+  opacity: 0.4;
+}
+.empty {
+  grid-column: 1 / -1;
+  text-align: center;
+  color: var(--muted);
+  padding: 40px 0;
+  line-height: 1.6;
+}
+
+/* ---------- Rodapé ---------- */
+.bottom {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px 12px;
+}
+.now {
+  flex: 1;
+  text-align: center;
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--accent);
+}
+
+/* ---------- Bottom sheets ---------- */
+.sheet {
+  position: fixed;
+  inset: 0;
+  background: #000a;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  z-index: 10;
+}
+.sheet[hidden] {
+  display: none;
+}
+.sheet-panel {
+  width: 100%;
+  max-width: 720px;
+  max-height: 85dvh;
+  overflow-y: auto;
+  background: var(--panel);
+  border-radius: 20px 20px 0 0;
+  padding: 16px 16px calc(16px + env(safe-area-inset-bottom));
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.sheet-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.sheet-head h2 {
+  margin: 0;
+  font-size: 18px;
+}
+.sheet-head .ghost {
+  padding: 8px 12px;
+}
+
+.slider {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 6px 10px;
+  margin-bottom: 14px;
+  font-weight: 600;
+}
+.slider output {
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+.slider input {
+  grid-column: 1 / -1;
+  width: 100%;
+  accent-color: var(--accent);
+  height: 28px;
+}

@@ -11,8 +11,13 @@ export interface Layer {
 export interface Timbre {
   id: string;
   name: string;
-  samples?: boolean; // usa amostras gravadas em vez de osciladores
-  warning?: string; // aviso exibido nas configurações
+  sampleSet?: string; // pasta em public/samples: usa gravações em vez de osciladores
+  oneShot?: boolean; // a nota decai sozinha (piano): sem loop, ataque instantâneo
+  memMB?: number; // memória aproximada das amostras decodificadas
+  downloadMB?: number;
+  noteAttack?: number; // ataque de cada nota nos modos Dedilhado/Arpejo (s)
+  brokenGain?: number; // ajuste de volume no Dedilhado (padrão 1)
+  arpGain?: number; // ajuste de volume no Arpejo (padrão 1)
   body: Layer[]; // passa pelo filtro principal
   shimmer: Layer[]; // camada aguda, controlada pelo slider "Shimmer"
   shimmerCutoff?: number; // lowpass da camada aguda (Hz); ausente = sem filtro
@@ -71,20 +76,95 @@ export const TIMBRES: Timbre[] = [
   },
   {
     id: 'orchestra',
-    name: 'Orquestra (amostras)',
-    samples: true,
-    warning:
-      'Usa gravações reais de naipes de cordas: cerca de 40 MB de memória e 1,5 MB de download na primeira vez. ' +
-      'Em aparelhos com pouca memória, o navegador pode recarregar a página.',
+    name: 'Orquestra',
+    sampleSet: 'strings',
+    memMB: 40,
+    downloadMB: 1.5,
     body: [],
     shimmer: [],
     bodyGain: 1.25,
+    brokenGain: 1.2,
+    arpGain: 1.9,
     cutoffScale: 3,
     filterQ: 0.4,
     highpass: 35,
     filterLfo: { rate: 0.06, depth: 150 },
     swell: true,
   },
+  {
+    id: 'organ',
+    name: 'Órgão',
+    sampleSet: 'organ',
+    memMB: 27,
+    downloadMB: 1,
+    body: [],
+    shimmer: [],
+    bodyGain: 1.25,
+    arpGain: 1.6,
+    cutoffScale: 4,
+    filterQ: 0.4,
+    highpass: 30,
+    filterLfo: { rate: 0.05, depth: 80 },
+    swell: false,
+  },
+  {
+    id: 'horn',
+    name: 'Trompas',
+    sampleSet: 'horn',
+    memMB: 22,
+    downloadMB: 0.8,
+    body: [],
+    shimmer: [],
+    bodyGain: 1.1,
+    brokenGain: 0.8,
+    arpGain: 0.75,
+    cutoffScale: 3,
+    filterQ: 0.4,
+    highpass: 35,
+    filterLfo: { rate: 0.06, depth: 120 },
+    swell: true,
+  },
+  {
+    id: 'piano',
+    name: 'Piano',
+    sampleSet: 'piano',
+    oneShot: true,
+    memMB: 39,
+    downloadMB: 1.4,
+    body: [],
+    shimmer: [],
+    bodyGain: 0.5,
+    cutoffScale: 6,
+    filterQ: 0.3,
+    highpass: 30,
+    filterLfo: { rate: 0.05, depth: 0 },
+    swell: false,
+  },
+  {
+    id: 'flute',
+    name: 'Flauta',
+    sampleSet: 'flute',
+    memMB: 16,
+    downloadMB: 0.6,
+    body: [],
+    shimmer: [],
+    bodyGain: 1.25,
+    brokenGain: 0.7,
+    cutoffScale: 4,
+    filterQ: 0.4,
+    highpass: 60,
+    filterLfo: { rate: 0.05, depth: 100 },
+    swell: false,
+  },
 ];
+
+/** Aviso de memória dos timbres com amostras. */
+export function sampleWarning(t: Timbre): string | null {
+  if (!t.sampleSet) return null;
+  return (
+    `Usa gravações reais: cerca de ${t.memMB} MB de memória e ${String(t.downloadMB).replace('.', ',')} MB ` +
+    'de download na primeira vez. Em aparelhos com pouca memória, o navegador pode recarregar a página.'
+  );
+}
 
 export const timbreById = (id: string) => TIMBRES.find((t) => t.id === id) ?? TIMBRES[0];

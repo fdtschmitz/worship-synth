@@ -73,6 +73,67 @@ button {
   box-shadow: 0 1px 0 #ffffff10 inset;
 }
 
+[hidden] {
+  display: none !important;
+}
+
+/* ---------- Modo de execução + tempo ---------- */
+.modebar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 12px 4px;
+}
+.seg {
+  flex: 1;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 2px;
+  background: var(--panel);
+  border: 1px solid var(--pad-border);
+  border-radius: 10px;
+  padding: 2px;
+}
+.seg button {
+  border: 0;
+  background: transparent;
+  padding: 8px 2px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+}
+.seg button.on {
+  background: var(--accent);
+  color: #0b0d12;
+}
+.tempo {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+#bpm-label {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+  min-width: 48px;
+  text-align: right;
+}
+#tap {
+  padding: 8px 12px;
+  font-size: 13px;
+  letter-spacing: 0.05em;
+}
+#tap.flash {
+  animation: tap-flash 0.15s ease-out;
+}
+@keyframes tap-flash {
+  from {
+    background: var(--accent);
+    color: #0b0d12;
+  }
+}
+
 main {
   flex: 1;
   overflow-y: auto;
@@ -274,6 +335,19 @@ button:disabled {
   color: #ffd27a;
   font-size: 13px;
   line-height: 1.45;
+}
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.section .slider {
+  margin-bottom: 0;
+}
+.caption {
+  margin: -4px 0 0;
+  font-size: 13px;
+  color: var(--muted);
 }
 .warn-mark {
   color: #ffb020;

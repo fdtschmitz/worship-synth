@@ -14,13 +14,22 @@ npm run build     # gera /dist (estático, pode ser hospedado em qualquer lugar 
 
 - `src/audio.ts`: motor de som (osciladores desafinados, filtro com LFO, camada shimmer, reverb por convolução, fades equal-power)
 - `src/chords.ts`: tipos de acorde e voicings
-- `src/timbres.ts`: definição dos timbres (Pad clássico, Cordas etéreas, Atmosfera, Orquestra)
+- `src/timbres.ts`: definição dos timbres (sintetizados: Pad clássico, Cordas etéreas, Atmosfera; gravados: Orquestra, Órgão, Trompas, Piano, Flauta)
+- `src/sequencer.ts`: modos Dedilhado e Arpejo (padrão 4/4, notas, oitavas, direção)
 - `src/samples.ts`: carregamento das amostras gravadas e loop sem emenda
 - `src/main.ts`: interface (abas, grade de 12 pads, sequência, configurações)
 - `public/`: manifest, ícone e service worker (offline)
-- `public/samples/strings/`: amostras de cordas do VSCO 2 CE (CC0), usadas pelo timbre "Orquestra". Veja `scripts/samples/` para regerar.
+- `public/samples/`: amostras do VSCO 2 CE (CC0) para os timbres gravados. Veja `scripts/samples/` para regerar.
 
-O timbre "Orquestra (amostras)" é opcional: baixa cerca de 1,5 MB na primeira vez e ocupa cerca de 40 MB de memória enquanto está selecionado. Os outros timbres são sintetizados e não carregam nada.
+Os timbres gravados são opcionais: cada um baixa de 0,6 a 1,5 MB na primeira vez e ocupa de 16 a 40 MB de memória, só enquanto está selecionado. Os timbres sintetizados não carregam nada. O piano não usa loop: cada nota decai naturalmente, por isso ele brilha mais nos modos Dedilhado e Arpejo.
+
+## Modos de execução
+
+- **Pad**: o acorde sustentado, com fade in/out.
+- **Dedilhado**: o acorde quebrado em colcheias, num compasso 4/4 (baixo, quinta, oitava, terça, nota aguda e volta).
+- **Arpejo**: notas do acorde em sequência, com escolha de quantas notas (tônica, 3ª, 5ª, 7ª, 9ª, 11ª/13ª), oitavas, direção e figura rítmica.
+
+O tempo é ajustado por slider ou pelo botão TAP. Nos modos rítmicos, o padrão começa no instante do toque.
 
 ## Observações para celular
 

@@ -1,0 +1,12 @@
+Amostras gravadas usadas pelos timbres "Orquestra", "Órgão", "Trompas", "Piano" e "Flauta":
+Versilian Studios Chamber Orchestra 2 – Community Edition (VSCO 2 CE)
+https://versilian-studios.com/vsco-community/
+Licença: CC0 1.0 (domínio público)
+
+- strings/: naipes de violinos, violas, cellos e contrabaixos (sustain com vibrato, dinâmica "Quiet")
+- organ/:   órgão de tubos, registro suave (OrganQuiet)
+- horn/:    trompa em Fá, sustain, camada de dinâmica mais suave (FHornSus)
+- flute/:   flauta, sustain sem vibrato, camada mais suave (FluteSusNV)
+- piano/:   piano de armário, dinâmica mf (UprightPiano, dyn2)
+
+Arquivos recortados, normalizados e convertidos para MP3 por scripts/samples/.

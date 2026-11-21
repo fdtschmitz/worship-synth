@@ -1,7 +1,8 @@
 import './style.css';
 import { PadEngine, type PadSettings } from './audio';
-import { CHORDS, NOTE_NAMES, SPECIAL_TYPES, chordLabel, padVoicing, type ChordType } from './chords';
-import { TIMBRES, timbreById } from './timbres';
+import { CHORDS, NOTE_NAMES, SPECIAL_TYPES, chordLabel, type ChordType } from './chords';
+import { ARP_NOTE_LABELS, type ArpDir, type PlayMode, type RhythmSettings } from './sequencer';
+import { TIMBRES, sampleWarning, timbreById } from './timbres';
 
 type Tab = 'maj' | 'min' | 'special' | 'seq';
 interface Step {
@@ -35,6 +36,14 @@ const settings: PadSettings = load('settings', {
   reverb: 0.6,
   shimmer: 0.4,
 });
+const rhythm: RhythmSettings = load('rhythm', {
+  mode: 'pad' as PlayMode,
+  bpm: 72,
+  arpNotes: 3,
+  arpOctaves: 2,
+  arpDir: 'up' as ArpDir,
+  arpDiv: 8 as 4 | 8 | 16,
+});
 const ui = load('ui', { tab: 'maj' as Tab, special: 'sus2' as ChordType });
 let sequence: Step[] = (() => {
   try {
@@ -44,7 +53,7 @@ let sequence: Step[] = (() => {
   }
 })();
 
-const engine = new PadEngine(settings);
+const engine = new PadEngine(settings, rhythm);
 let activeKey: string | null = null;
 let seqIndex = -1;
 
@@ -77,7 +86,7 @@ let loadingText: string | null = null;
 
 /** Garante que as amostras do timbre atual estão carregadas. */
 async function prepareSamples() {
-  if (!timbreById(settings.timbre).samples || engine.samplesReady) return;
+  if (!timbreById(settings.timbre).sampleSet || engine.samplesReady) return;
   loadingText = 'Carregando…';
   refreshActive();
   try {
@@ -101,13 +110,14 @@ async function setTimbre(id: string) {
   save('settings', settings);
   renderTimbres();
   await prepareSamples();
-  // Se algo está tocando, faz crossfade do mesmo acorde para o novo timbre.
-  if (activeKey && settings.timbre === id) {
-    const [r, t] = activeKey.split(':');
-    const { body, shimmer } = padVoicing(Number(r), t as ChordType);
-    engine.stop(activeKey);
-    engine.start(activeKey, body, shimmer);
-  }
+  if (settings.timbre === id) restartActive();
+}
+
+/** Recria o acorde que está tocando (troca de timbre ou de modo). */
+function restartActive() {
+  if (!activeKey) return;
+  const [r, t] = activeKey.split(':');
+  engine.play(activeKey, Number(r), t as ChordType, true);
 }
 
 async function toggle(step: Step) {
@@ -118,9 +128,7 @@ async function toggle(step: Step) {
     engine.stop(key);
     activeKey = null;
   } else {
-    if (activeKey) engine.stop(activeKey); // crossfade: um sai enquanto o outro entra
-    const { body, shimmer } = padVoicing(step.root, step.type);
-    engine.start(key, body, shimmer);
+    engine.play(key, step.root, step.type); // faz crossfade / troca de padrão
     activeKey = key;
   }
   refreshActive();
@@ -147,6 +155,17 @@ app.innerHTML = `
       <button data-tab="seq">Sequência</button>
     </nav>
   </header>
+  <div class="modebar">
+    <div class="seg" id="modes">
+      <button data-mode="pad">Pad</button>
+      <button data-mode="broken">Dedilhado</button>
+      <button data-mode="arp">Arpejo</button>
+    </div>
+    <div class="tempo" id="tempo">
+      <span id="bpm-label"></span>
+      <button id="tap" class="ghost">TAP</button>
+    </div>
+  </div>
   <main id="view"></main>
   <footer class="bottom">
     <button id="stop" class="ghost">■ Parar</button>
@@ -159,6 +178,23 @@ app.innerHTML = `
       <div class="field-label">Timbre</div>
       <div class="chips" id="timbres"></div>
       <p class="hint" id="timbre-hint" hidden></p>
+      <section id="rhythm-section" class="section">
+        <label class="slider">
+          <span>Tempo</span><output id="o-bpm"></output>
+          <input type="range" id="bpm" min="40" max="200" step="1">
+        </label>
+        <div id="arp-section" class="section">
+          <div class="field-label">Notas do arpejo</div>
+          <div class="chips" id="arp-notes"></div>
+          <p class="caption" id="arp-notes-desc"></p>
+          <div class="field-label">Oitavas</div>
+          <div class="chips" id="arp-oct"></div>
+          <div class="field-label">Direção</div>
+          <div class="chips" id="arp-dir"></div>
+          <div class="field-label">Figura</div>
+          <div class="chips" id="arp-div"></div>
+        </div>
+      </section>
       <div id="sliders"></div>
     </div>
   </div>
@@ -327,14 +363,15 @@ const sliderDefs: { key: NumericSetting; label: string; min: number; max: number
 function renderTimbres() {
   $('#timbres').innerHTML = TIMBRES.map(
     (t) =>
-      `<button class="chip ${t.id === settings.timbre ? 'on' : ''}" data-timbre="${t.id}">${t.name}${t.warning ? ' <span class="warn-mark">⚠︎</span>' : ''}</button>`,
+      `<button class="chip ${t.id === settings.timbre ? 'on' : ''}" data-timbre="${t.id}">${t.name}${t.sampleSet ? ' <span class="warn-mark">⚠︎</span>' : ''}</button>`,
   ).join('');
   const t = timbreById(settings.timbre);
+  const warning = sampleWarning(t);
   const hint = $('#timbre-hint');
-  hint.hidden = !t.warning;
-  if (t.warning) {
+  hint.hidden = !warning;
+  if (warning) {
     const mb = engine.samplesBytes / 1e6;
-    hint.textContent = `⚠︎ ${t.warning}${mb ? ` Em uso agora: ${Math.round(mb)} MB.` : ''}`;
+    hint.textContent = `⚠︎ ${warning}${mb ? ` Em uso agora: ${Math.round(mb)} MB.` : ''}`;
   }
 }
 
@@ -343,9 +380,10 @@ $('#timbres').addEventListener('click', async (e) => {
   const id = b?.dataset.timbre;
   if (!id || id === settings.timbre) return;
   const t = timbreById(id);
-  if (t.warning && !localStorage.getItem('samplesWarned')) {
-    if (!confirm(`${t.warning}\n\nDeseja continuar?`)) return;
-    save('samplesWarned', true);
+  const warning = sampleWarning(t);
+  if (warning && !localStorage.getItem(`warned:${id}`)) {
+    if (!confirm(`${t.name}: ${warning}\n\nDeseja continuar?`)) return;
+    save(`warned:${id}`, true);
   }
   await engine.unlock(); // ainda dentro do gesto do usuário
   await setTimbre(id);
@@ -415,6 +453,80 @@ picker.addEventListener('click', (e) => {
   }
 });
 
+// ---------- Ritmo (Dedilhado / Arpejo) ----------
+const DIRS: [ArpDir, string][] = [
+  ['up', 'Sobe'],
+  ['down', 'Desce'],
+  ['updown', 'Sobe e desce'],
+  ['random', 'Aleatória'],
+];
+const DIVS: [4 | 8 | 16, string][] = [
+  [4, 'Semínima'],
+  [8, 'Colcheia'],
+  [16, 'Semicolcheia'],
+];
+const chipRow = <T extends string | number>(attr: string, items: [T, string][], current: T) =>
+  items.map(([v, label]) => `<button class="chip ${v === current ? 'on' : ''}" data-${attr}="${v}">${label}</button>`).join('');
+
+function renderRhythm() {
+  document.querySelectorAll<HTMLButtonElement>('#modes button').forEach((b) => {
+    b.classList.toggle('on', b.dataset.mode === rhythm.mode);
+  });
+  $('#tempo').hidden = rhythm.mode === 'pad';
+  $('#bpm-label').textContent = `♩ ${rhythm.bpm}`;
+  $('#rhythm-section').hidden = rhythm.mode === 'pad';
+  $('#arp-section').hidden = rhythm.mode !== 'arp';
+  $<HTMLInputElement>('#bpm').value = String(rhythm.bpm);
+  $('#o-bpm').textContent = `${rhythm.bpm} BPM`;
+  $('#arp-notes').innerHTML = chipRow('arp-notes', ARP_NOTE_LABELS.map((_, i): [number, string] => [i + 1, String(i + 1)]), rhythm.arpNotes);
+  $('#arp-notes-desc').textContent = ARP_NOTE_LABELS.slice(0, rhythm.arpNotes).join(' ');
+  $('#arp-oct').innerHTML = chipRow('arp-oct', [[1, '1'], [2, '2'], [3, '3']], rhythm.arpOctaves);
+  $('#arp-dir').innerHTML = chipRow('arp-dir', DIRS, rhythm.arpDir);
+  $('#arp-div').innerHTML = chipRow('arp-div', DIVS, rhythm.arpDiv);
+}
+
+function setRhythm(patch: Partial<RhythmSettings>) {
+  const modeChanged = patch.mode !== undefined && patch.mode !== rhythm.mode;
+  Object.assign(rhythm, patch); // o engine lê o mesmo objeto: vale no próximo passo
+  save('rhythm', rhythm);
+  renderRhythm();
+  if (modeChanged) restartActive();
+}
+
+$('#modes').addEventListener('click', (e) => {
+  const b = (e.target as HTMLElement).closest<HTMLElement>('[data-mode]');
+  if (b) setRhythm({ mode: b.dataset.mode as PlayMode });
+});
+
+$('#bpm').addEventListener('input', (e) => setRhythm({ bpm: Number((e.target as HTMLInputElement).value) }));
+
+$('#arp-section').addEventListener('click', (e) => {
+  const el = (e.target as HTMLElement).closest<HTMLElement>('.chip');
+  if (!el) return;
+  const d = el.dataset;
+  if (d.arpNotes) setRhythm({ arpNotes: Number(d.arpNotes) });
+  else if (d.arpOct) setRhythm({ arpOctaves: Number(d.arpOct) });
+  else if (d.arpDir) setRhythm({ arpDir: d.arpDir as ArpDir });
+  else if (d.arpDiv) setRhythm({ arpDiv: Number(d.arpDiv) as 4 | 8 | 16 });
+});
+
+// Tap tempo: média dos últimos intervalos (uma pausa de mais de 2 s recomeça a contagem).
+let taps: number[] = [];
+$('#tap').addEventListener('click', () => {
+  const t = performance.now();
+  if (taps.length && t - taps[taps.length - 1] > 2000) taps = [];
+  taps.push(t);
+  taps = taps.slice(-5);
+  const tap = $('#tap');
+  tap.classList.remove('flash');
+  void tap.offsetWidth; // reinicia a animação
+  tap.classList.add('flash');
+  if (taps.length < 2) return;
+  const avg = (taps[taps.length - 1] - taps[0]) / (taps.length - 1);
+  setRhythm({ bpm: Math.max(40, Math.min(200, Math.round(60000 / avg))) });
+});
+
+renderRhythm();
 renderTimbres();
 render();
 

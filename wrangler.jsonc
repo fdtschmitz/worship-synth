@@ -1,0 +1,8 @@
+// Publicação no Cloudflare: o app é um site estático (a pasta dist gerada pelo build).
+{
+  "name": "worship-synth",
+  "compatibility_date": "2025-06-01",
+  "assets": {
+    "directory": "./dist"
+  }
+}

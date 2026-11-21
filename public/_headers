@@ -1,0 +1,3 @@
+# O service worker precisa ser revalidado a cada visita, senão versões novas do app demoram a chegar.
+/sw.js
+  Cache-Control: no-cache

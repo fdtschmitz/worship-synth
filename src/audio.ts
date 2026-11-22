@@ -3,6 +3,13 @@ import { fitNote, loadSampleSet, nearest, type SampleSet } from './samples';
 import { arpIndex, arpPool, brokenStep, stepSeconds, type NoteEvent, type RhythmSettings } from './sequencer';
 import { timbreById, type Layer, type Timbre } from './timbres';
 
+/** Um acorde do loop e sua duração, em tempos. */
+export interface LoopStep {
+  root: number;
+  type: ChordType;
+  beats: number;
+}
+
 export interface PadSettings {
   timbre: string; // id em TIMBRES
   fadeIn: number; // segundos
@@ -189,11 +196,36 @@ abstract class Voice {
     }
   }
 
-  fadeOut(seconds: number) {
-    if (this.stopped) return;
+  /** `force`: refaz o fade mesmo se a saída já estava agendada (parar o loop). */
+  fadeOut(seconds: number, force = false) {
+    if (this.stopped && !force) return;
     this.stopped = true;
     fade(this.ctx, this.env.gain, 0, seconds);
     this.hardEnd = this.ctx.currentTime + Math.max(0.03, seconds) + 0.1;
+    for (const src of this.sources) src.stop(this.hardEnd);
+    this.lfoSrc.onended = () => {
+      this.env.disconnect();
+      this.onEnded();
+    };
+  }
+
+  /** Entrada direta em `t` (loop): sem fade, só uma rampa curta contra estalos. */
+  enterAt(t: number, ramp = 0.015) {
+    const g = this.env.gain;
+    g.cancelScheduledValues(0);
+    g.setValueAtTime(0, this.ctx.currentTime);
+    g.setValueAtTime(0, t);
+    g.linearRampToValueAtTime(1, t + ramp);
+  }
+
+  /** Saída direta em `t` (loop): nada desta voz soa depois de t + ramp. */
+  leaveAt(t: number, ramp = 0.02) {
+    if (this.stopped) return;
+    this.stopped = true;
+    const g = this.env.gain;
+    g.setValueAtTime(1, t);
+    g.linearRampToValueAtTime(0, t + ramp);
+    this.hardEnd = t + ramp + 0.05;
     for (const src of this.sources) src.stop(this.hardEnd);
     this.lfoSrc.onended = () => {
       this.env.disconnect();
@@ -204,7 +236,16 @@ abstract class Voice {
 
 /** Modo Pad: todas as notas do acorde sustentadas. */
 class PadVoice extends Voice {
-  constructor(ctx: AudioContext, dest: AudioNode, s: PadSettings, timbre: Timbre, samples: SampleSet | null, root: number, type: ChordType) {
+  constructor(
+    ctx: AudioContext,
+    dest: AudioNode,
+    s: PadSettings,
+    timbre: Timbre,
+    samples: SampleSet | null,
+    root: number,
+    type: ChordType,
+    when = ctx.currentTime, // no loop, a voz é criada antes e começa na divisa
+  ) {
     let { body, shimmer } = padVoicing(root, type);
     if (samples) {
       // Encaixa na extensão do instrumento e remove notas repetidas.
@@ -213,7 +254,7 @@ class PadVoice extends Voice {
     }
     // Piano: o acorde decai, então o ataque recebe um pouco mais de volume.
     super(ctx, dest, s, timbre, samples, (timbre.bodyGain * (timbre.oneShot ? 1.4 : 1)) / Math.sqrt(body.length));
-    const now = ctx.currentTime;
+    const now = when;
     if (samples && timbre.oneShot) {
       // Piano: acorde tocado do grave para o agudo, com um leve "rolar" (12 ms
       // entre notas), e cada nota decaindo naturalmente.
@@ -238,6 +279,7 @@ class PadVoice extends Voice {
 
 /** Modos Dedilhado e Arpejo: notas individuais disparadas pelo relógio. */
 class PatternVoice extends Voice {
+  next = 0; // instante do próximo passo (cada voz tem o próprio relógio)
   private i = 0;
   private prevIdx = -1;
   private genEnd = Infinity;
@@ -268,10 +310,20 @@ class PatternVoice extends Voice {
     return t < this.genEnd && t < this.hardEnd;
   }
 
+  leaveAt(t: number, ramp = 0.06) {
+    this.genEnd = Math.min(this.genEnd, t);
+    super.leaveAt(t, ramp);
+  }
+
+  fadeOut(seconds: number, force = false) {
+    // Parar o loop: o padrão que está soando continua durante o fade out.
+    if (force) this.genEnd = Infinity;
+    super.fadeOut(seconds, force);
+  }
+
   /** Agenda o próximo passo do padrão no instante `time`. */
   step(time: number, stepDur: number) {
     if (!this.generatingAt(time)) return;
-    const beat = 60 / this.r.bpm;
     let events: NoteEvent[];
     let release: number;
     if (this.r.mode === 'broken') {
@@ -281,11 +333,11 @@ class PatternVoice extends Voice {
       const pool = arpPool(this.root, this.type, this.r.arpNotes, this.r.arpOctaves);
       const idx = arpIndex(pool.length, this.r.arpDir, this.i, this.prevIdx);
       this.prevIdx = idx;
-      const stepsPerBeat = this.r.arpDiv / 4;
-      events = [{ note: pool[idx], beats: (0.9 * stepDur) / beat, vel: this.i % stepsPerBeat === 0 ? 1 : 0.8 }];
+      const stepsPerBeat = Math.max(1, this.r.div / 4);
+      events = [{ note: pool[idx], len: 0.9, vel: this.i % stepsPerBeat === 0 ? 1 : 0.8 }];
       release = 0.25;
     }
-    for (const e of events) this.playNote(e.note, time, e.beats * beat, e.vel, release);
+    for (const e of events) this.playNote(e.note, time, e.len * stepDur, e.vel, release);
     this.i++;
   }
 
@@ -350,7 +402,14 @@ export class PadEngine {
   private active = new Map<string, Voice>();
   private patterns = new Set<PatternVoice>(); // inclui as que estão em fade out
   private timer: ReturnType<typeof setInterval> | null = null;
-  private nextTime = 0;
+  private loop: {
+    steps: LoopStep[];
+    i: number; // passo que será agendado a seguir
+    next: number; // instante da próxima troca de acorde
+    bus: GainNode; // fade in/out do loop inteiro
+    voices: Voice[]; // a que soa e a já agendada
+    onStep: (index: number) => void;
+  } | null = null;
 
   constructor(
     private s: PadSettings,
@@ -391,6 +450,7 @@ export class PadEngine {
     this.timer = null;
     this.active.clear();
     this.patterns.clear();
+    this.loop = null;
     const old = this.ctx;
     this.ctx = null;
     if (old && old.state !== 'closed') old.close().catch(() => {});
@@ -541,25 +601,106 @@ export class PadEngine {
     this.patterns.add(v);
     this.active.set(key, v);
     v.fadeIn(this.s.fadeIn);
-    // O compasso começa no toque.
-    this.nextTime = ctx.currentTime + 0.02;
-    if (this.timer === null) this.timer = setInterval(() => this.tick(), TICK_MS);
+    v.next = ctx.currentTime + 0.02; // o compasso começa no toque
+    this.ensureTimer();
     this.tick();
   }
 
+  private ensureTimer() {
+    if (this.timer === null) this.timer = setInterval(() => this.tick(), TICK_MS);
+  }
+
   private tick() {
-    const ctx = this.ctx!;
+    const ctx = this.ctx;
+    if (!ctx) return;
     const now = ctx.currentTime;
-    if (this.nextTime < now) this.nextTime = now + 0.01; // após a aba ficar em segundo plano
-    while (this.nextTime < now + LOOKAHEAD) {
-      const dur = stepSeconds(this.r);
-      for (const p of this.patterns) p.step(this.nextTime, dur);
-      this.nextTime += dur;
+    const L = this.loop;
+    if (L) {
+      if (L.next < now) L.next = now + 0.01; // após a aba ficar em segundo plano
+      while (L.next < now + LOOKAHEAD) this.scheduleLoopStep(L, L.next);
     }
-    if (![...this.patterns].some((p) => p.generatingAt(now))) {
+    const dur = stepSeconds(this.r);
+    for (const p of this.patterns) {
+      if (p.next < now - 0.05) p.next = now + 0.01;
+      while (p.next < now + LOOKAHEAD && p.generatingAt(p.next)) {
+        p.step(p.next, dur);
+        p.next += dur;
+      }
+    }
+    if (!L && ![...this.patterns].some((p) => p.generatingAt(now))) {
       clearInterval(this.timer!);
       this.timer = null;
     }
+  }
+
+  // ---------- Loop (aba Sequência) ----------
+
+  get looping() {
+    return this.loop !== null;
+  }
+
+  /**
+   * Toca a sequência em ciclo. As trocas de acorde são agendadas no relógio
+   * de áudio, exatamente na duração de cada passo, e são diretas (sem fade).
+   * O fade in/out configurado vale só para iniciar e parar o loop.
+   */
+  startLoop(steps: LoopStep[], onStep: (index: number) => void) {
+    const ctx = this.ctx;
+    if (!ctx || !steps.length) return;
+    this.stopLoop();
+    this.stopAll();
+    const bus = ctx.createGain();
+    bus.gain.value = 0;
+    bus.connect(this.bus);
+    fade(ctx, bus.gain, 1, timbreById(this.s.timbre).oneShot ? 0.01 : this.s.fadeIn);
+    this.loop = { steps, i: 0, next: ctx.currentTime + 0.05, bus, voices: [], onStep };
+    this.ensureTimer();
+    this.tick();
+  }
+
+  /** Atualiza os passos com o loop tocando (vale a partir da próxima troca). */
+  setLoopSteps(steps: LoopStep[]) {
+    if (this.loop && steps.length) this.loop.steps = steps;
+    else if (this.loop) this.stopLoop();
+  }
+
+  stopLoop() {
+    const L = this.loop;
+    if (!L || !this.ctx) return;
+    this.loop = null;
+    fade(this.ctx, L.bus.gain, 0, this.s.fadeOut);
+    for (const v of L.voices) v.fadeOut(this.s.fadeOut + 0.05, true);
+    setTimeout(() => L.bus.disconnect(), (this.s.fadeOut + 0.5) * 1000);
+  }
+
+  private scheduleLoopStep(L: NonNullable<PadEngine['loop']>, t: number) {
+    const ctx = this.ctx!;
+    const index = L.i % L.steps.length;
+    const step = L.steps[index];
+    const timbre = timbreById(this.s.timbre);
+    const prev = L.voices[L.voices.length - 1];
+    // Timbre gravado ainda carregando (troca de timbre no meio do loop): pula este acorde.
+    if (!timbre.sampleSet || this.samplesReady) {
+      const samples = timbre.sampleSet ? this.loadedSamples : null;
+      let v: Voice;
+      if (this.r.mode === 'pad') {
+        v = new PadVoice(ctx, L.bus, this.s, timbre, samples, step.root, step.type, t);
+      } else {
+        const pv = new PatternVoice(ctx, L.bus, this.s, timbre, samples, this.r, step.root, step.type);
+        pv.next = t; // o padrão recomeça junto com o acorde
+        pv.onEnded = () => this.patterns.delete(pv);
+        this.patterns.add(pv);
+        v = pv;
+      }
+      v.enterAt(t);
+      L.voices.push(v);
+    }
+    prev?.leaveAt(t);
+    L.voices = L.voices.slice(-2);
+    const delay = Math.max(0, (t - ctx.currentTime) * 1000);
+    setTimeout(() => this.loop === L && L.onStep(index), delay); // destaque na tela, na hora certa
+    L.next = t + (step.beats * 60) / this.r.bpm;
+    L.i++;
   }
 
   stop(key: string) {

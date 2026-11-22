@@ -208,6 +208,104 @@ main {
   color: var(--muted);
   font-weight: 600;
 }
+/* Duração do acorde no loop */
+.pad .dur {
+  position: absolute;
+  right: 8px;
+  bottom: 6px;
+  font-style: normal;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--accent);
+  background: #7cc4ff1f;
+  border-radius: 6px;
+  padding: 1px 6px;
+}
+.pad.active .dur {
+  color: #0b0d12;
+  background: #ffffff66;
+}
+/* No loop a troca é direta: o destaque acompanha sem transição lenta */
+.pad.snap::before,
+.pad.snap.active::before {
+  transition: opacity 0.06s linear;
+}
+
+/* Segurar para remover: o botão encolhe e avermelha durante o toque longo */
+.pad.step.holding {
+  transform: scale(0.9);
+  border-color: #ff6b81;
+  background: #ff6b8126;
+  transition:
+    transform 0.55s ease-in,
+    background 0.55s ease-in,
+    border-color 0.55s ease-in;
+}
+
+/* Aviso com "Desfazer" */
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: calc(96px + env(safe-area-inset-bottom));
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 10px 10px 16px;
+  border-radius: 12px;
+  background: #2a3140;
+  color: var(--text);
+  font-weight: 600;
+  box-shadow: 0 6px 24px #0008;
+  z-index: 20;
+  white-space: nowrap;
+}
+.toast button {
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font-weight: 700;
+  padding: 6px 8px;
+}
+
+/* Interruptor */
+.switch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: var(--panel);
+  border: 1px solid var(--pad-border);
+  border-radius: 12px;
+  padding: 8px 12px;
+  font-weight: 600;
+}
+.switch {
+  position: relative;
+  width: 50px;
+  height: 30px;
+  border-radius: 999px;
+  border: 0;
+  background: var(--pad-border);
+  transition: background 0.2s;
+  padding: 0;
+}
+.switch i {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform 0.2s;
+}
+.switch.on {
+  background: var(--accent);
+}
+.switch.on i {
+  transform: translateX(20px);
+}
+
 .pad.step.cursor {
   outline: 2px dashed var(--accent);
   outline-offset: 2px;

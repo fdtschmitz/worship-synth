@@ -1,7 +1,7 @@
 import './style.css';
 import { PadEngine, type PadSettings } from './audio';
 import { CHORDS, NOTE_NAMES, SPECIAL_TYPES, chordLabel, type ChordType } from './chords';
-import { ARP_NOTE_LABELS, type ArpDir, type PlayMode, type RhythmSettings } from './sequencer';
+import { ARP_NOTE_LABELS, type ArpDir, type NoteDiv, type PlayMode, type RhythmSettings } from './sequencer';
 import {
   clearStoredSamples,
   downloadSampleSets,
@@ -16,7 +16,17 @@ type Tab = 'maj' | 'min' | 'special' | 'seq';
 interface Step {
   root: number;
   type: ChordType;
+  dur?: number; // duração no loop, em compassos de 4/4 (padrão 1)
 }
+
+/** Durações do loop, em compassos de 4/4. */
+const DURS: [number, string][] = [
+  [0.25, '1/4'],
+  [0.5, '1/2'],
+  [1, '1'],
+  [2, '2'],
+];
+const durLabel = (d = 1) => DURS.find(([v]) => v === d)?.[1] ?? String(d);
 
 // ---------- Persistência ----------
 const load = <T>(k: string, def: T): T => {
@@ -50,9 +60,18 @@ const rhythm: RhythmSettings = load('rhythm', {
   arpNotes: 3,
   arpOctaves: 2,
   arpDir: 'up' as ArpDir,
-  arpDiv: 8 as 4 | 8 | 16,
+  div: 8 as NoteDiv,
 });
-const ui = load('ui', { tab: 'maj' as Tab, special: 'sus2' as ChordType });
+// Versões anteriores guardavam a figura só para o arpejo (arpDiv).
+{
+  const old = rhythm as RhythmSettings & { arpDiv?: NoteDiv };
+  if (old.arpDiv) {
+    rhythm.div = old.arpDiv;
+    delete old.arpDiv;
+    save('rhythm', rhythm);
+  }
+}
+const ui = load('ui', { tab: 'maj' as Tab, special: 'sus2' as ChordType, loop: false });
 let sequence: Step[] = (() => {
   try {
     return JSON.parse(localStorage.getItem('sequence') || '[]');
@@ -64,14 +83,16 @@ let sequence: Step[] = (() => {
 const engine = new PadEngine(settings, rhythm);
 let activeKey: string | null = null;
 let seqIndex = -1;
+let loopIndex = -1; // acorde do loop que está soando (-1 = loop parado)
 
 // ---------- Wake lock (tela não apaga enquanto toca) ----------
 let wakeLock: { release(): Promise<void> } | null = null;
 async function syncWakeLock() {
   const nav = navigator as Navigator & { wakeLock?: { request(t: 'screen'): Promise<any> } };
   try {
-    if (activeKey && !wakeLock && nav.wakeLock) wakeLock = await nav.wakeLock.request('screen');
-    else if (!activeKey && wakeLock) {
+    const playing = activeKey !== null || engine.looping;
+    if (playing && !wakeLock && nav.wakeLock) wakeLock = await nav.wakeLock.request('screen');
+    else if (!playing && wakeLock) {
       await wakeLock.release();
       wakeLock = null;
     }
@@ -96,6 +117,8 @@ let loadingText: string | null = null;
 // Se o contexto de áudio travou e foi recriado, o que tocava parou.
 engine.onReset = () => {
   activeKey = null;
+  loopIndex = -1;
+  if (ui.tab === 'seq') renderSequence();
   refreshActive();
   syncWakeLock();
 };
@@ -144,6 +167,7 @@ function restartActive() {
 async function toggle(step: Step) {
   await engine.unlock();
   await prepareSamples();
+  if (engine.looping) stopLoop();
   const key = keyOf(step);
   if (activeKey === key) {
     engine.stop(key);
@@ -157,6 +181,7 @@ async function toggle(step: Step) {
 }
 
 function stopAll() {
+  stopLoop();
   engine.stopAll();
   activeKey = null;
   refreshActive();
@@ -194,6 +219,7 @@ app.innerHTML = `
     <button id="open-settings" class="ghost" aria-label="Configurações">⚙︎</button>
   </footer>
   <p class="credit">Created by fdtschmitz - 2026</p>
+  <div id="toast" class="toast" hidden><span id="toast-text"></span><button id="toast-undo">Desfazer</button></div>
   <div id="sheet" class="sheet" hidden>
     <div class="sheet-panel">
       <div class="sheet-head"><h2>Configurações</h2><button id="close-settings" class="ghost">Fechar</button></div>
@@ -205,6 +231,11 @@ app.innerHTML = `
           <span>Tempo</span><output id="o-bpm"></output>
           <input type="range" id="bpm" min="40" max="200" step="1">
         </label>
+        <div id="div-section" class="section">
+          <div class="field-label">Duração das notas</div>
+          <div class="chips" id="note-div"></div>
+          <p class="caption">Muda a divisão rítmica do Dedilhado e do Arpejo sem mudar o tempo.</p>
+        </div>
         <div id="arp-section" class="section">
           <div class="field-label">Notas do arpejo</div>
           <div class="chips" id="arp-notes"></div>
@@ -213,8 +244,6 @@ app.innerHTML = `
           <div class="chips" id="arp-oct"></div>
           <div class="field-label">Direção</div>
           <div class="chips" id="arp-dir"></div>
-          <div class="field-label">Figura</div>
-          <div class="chips" id="arp-div"></div>
         </div>
       </section>
       <div id="sliders"></div>
@@ -272,17 +301,29 @@ function renderSequence() {
   const steps = sequence
     .map(
       (s, i) =>
-        `<button class="pad step ${i === seqIndex ? 'cursor' : ''}" data-key="${keyOf(s)}" data-root="${s.root}" data-type="${s.type}" data-index="${i}">
+        `<button class="pad step ${!ui.loop && i === seqIndex ? 'cursor' : ''}" data-key="${keyOf(s)}" data-root="${s.root}" data-type="${s.type}" data-index="${i}">
           <small>${i + 1}</small><span>${chordLabel(s.root, s.type)}</span>
+          ${ui.loop ? `<em class="dur">${durLabel(s.dur)}</em>` : ''}
         </button>`,
     )
     .join('');
+  const controls = ui.loop
+    ? `<div class="seq-actions">
+        <button id="loop-play" class="primary" ${sequence.length ? '' : 'disabled'}>${engine.looping ? '■ Parar loop' : '▶ Tocar loop'}</button>
+      </div>
+      <p class="caption">Toque num acorde para mudar a duração (em compassos de 4/4); segure para remover. As trocas seguem o tempo e o modo atuais, sem fade.</p>`
+    : `<div class="seq-actions">
+        <button id="seq-prev" class="ghost">◀ Anterior</button>
+        <button id="seq-next" class="primary">Próximo ▶</button>
+      </div>`;
   view.innerHTML = `
-    <div class="seq-actions">
-      <button id="seq-prev" class="ghost">◀ Anterior</button>
-      <button id="seq-next" class="primary">Próximo ▶</button>
-    </div>
+    <label class="switch-row">
+      <span>Loop</span>
+      <button id="loop-toggle" class="switch ${ui.loop ? 'on' : ''}" role="switch" aria-checked="${ui.loop}"><i></i></button>
+    </label>
+    ${controls}
     <div class="grid">${steps || '<p class="empty">Nenhum acorde na sequência.<br>Toque em “+ Adicionar”.</p>'}</div>
+    ${sequence.length && !ui.loop ? '<p class="caption">Segure um acorde para removê-lo.</p>' : ''}
     <div class="seq-actions">
       <button id="seq-add" class="ghost">+ Adicionar</button>
       <button id="seq-undo" class="ghost" ${sequence.length ? '' : 'disabled'}>Remover último</button>
@@ -291,14 +332,22 @@ function renderSequence() {
 }
 
 function refreshActive() {
+  const looping = engine.looping && loopIndex >= 0;
   document.querySelectorAll<HTMLButtonElement>('#view .pad').forEach((b) => {
-    const on = b.dataset.key === activeKey && (ui.tab !== 'seq' || Number(b.dataset.index) === seqIndex);
+    const on = looping
+      ? ui.tab === 'seq' && Number(b.dataset.index) === loopIndex
+      : b.dataset.key === activeKey && (ui.tab !== 'seq' || Number(b.dataset.index) === seqIndex);
     b.classList.toggle('active', on);
+    // Troca direta no loop: o destaque acompanha sem transição lenta.
+    b.classList.toggle('snap', looping);
   });
   document.documentElement.style.setProperty('--fade-in', `${settings.fadeIn}s`);
   document.documentElement.style.setProperty('--fade-out', `${settings.fadeOut}s`);
   if (loadingText) {
     $('#now').textContent = loadingText;
+  } else if (looping && sequence[loopIndex]) {
+    const st = sequence[loopIndex];
+    $('#now').textContent = `⟳ ${chordLabel(st.root, st.type)}`;
   } else if (activeKey) {
     const [r, t] = activeKey.split(':');
     $('#now').textContent = chordLabel(Number(r), t as ChordType);
@@ -317,6 +366,31 @@ function goSeq(i: number) {
 
 function saveSeq() {
   save('sequence', sequence);
+  engine.setLoopSteps(loopSteps()); // edições valem a partir da próxima troca
+}
+
+const loopSteps = () => sequence.map((s) => ({ root: s.root, type: s.type, beats: (s.dur ?? 1) * 4 }));
+
+async function startLoop() {
+  if (!sequence.length) return;
+  await engine.unlock();
+  await prepareSamples();
+  activeKey = null;
+  engine.startLoop(loopSteps(), (i) => {
+    loopIndex = i;
+    refreshActive();
+  });
+  render();
+  syncWakeLock();
+}
+
+function stopLoop() {
+  if (!engine.looping) return;
+  engine.stopLoop();
+  loopIndex = -1;
+  if (ui.tab === 'seq') renderSequence();
+  refreshActive();
+  syncWakeLock();
 }
 
 // ---------- Eventos ----------
@@ -328,7 +402,83 @@ $('.tabs').addEventListener('click', (e) => {
   render();
 });
 
+// ---------- Segurar um acorde da sequência para removê-lo ----------
+const HOLD_MS = 550;
+let hold: { timer: number; pad: HTMLElement; x: number; y: number } | null = null;
+let suppressClick = false; // o toque longo não deve contar também como toque
+
+function cancelHold() {
+  if (!hold) return;
+  clearTimeout(hold.timer);
+  hold.pad.classList.remove('holding');
+  hold = null;
+}
+
+view.addEventListener('pointerdown', (e) => {
+  // Novo toque: descarta a marca do toque longo anterior (após a remoção a
+  // lista é redesenhada e o clique daquele toque pode nem acontecer).
+  suppressClick = false;
+  const pad = (e.target as HTMLElement).closest<HTMLElement>('.pad.step');
+  if (!pad || pad.dataset.index === undefined) return;
+  cancelHold();
+  pad.classList.add('holding');
+  hold = {
+    pad,
+    x: e.clientX,
+    y: e.clientY,
+    timer: window.setTimeout(() => {
+      pad.classList.remove('holding');
+      hold = null;
+      suppressClick = true;
+      removeStep(Number(pad.dataset.index));
+    }, HOLD_MS),
+  };
+});
+view.addEventListener('pointermove', (e) => {
+  // Arrastar (rolar a tela) cancela.
+  if (hold && Math.hypot(e.clientX - hold.x, e.clientY - hold.y) > 10) cancelHold();
+});
+for (const ev of ['pointerup', 'pointercancel', 'pointerleave'] as const) view.addEventListener(ev, cancelHold);
+view.addEventListener('contextmenu', (e) => {
+  if ((e.target as HTMLElement).closest('.pad.step')) e.preventDefault(); // menu do toque longo no Android
+});
+
+let undo: { step: Step; index: number } | null = null;
+let toastTimer = 0;
+
+function removeStep(i: number) {
+  const step = sequence[i];
+  if (!step) return;
+  navigator.vibrate?.(15);
+  sequence.splice(i, 1);
+  if (seqIndex === i) seqIndex = -1;
+  else if (seqIndex > i) seqIndex--;
+  loopIndex = -1; // o destaque volta na próxima troca do loop
+  if (!sequence.length) stopLoop();
+  saveSeq();
+  render();
+  undo = { step, index: i };
+  $('#toast-text').textContent = `${chordLabel(step.root, step.type)} removido`;
+  $('#toast').hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = window.setTimeout(() => ($('#toast').hidden = true), 4000);
+}
+
+$('#toast-undo').addEventListener('click', () => {
+  if (!undo) return;
+  sequence.splice(Math.min(undo.index, sequence.length), 0, undo.step);
+  if (seqIndex >= undo.index) seqIndex++;
+  undo = null;
+  $('#toast').hidden = true;
+  saveSeq();
+  render();
+});
+
 view.addEventListener('click', (e) => {
+  if (suppressClick) {
+    suppressClick = false;
+    return;
+  }
   const el = e.target as HTMLElement;
   const chip = el.closest<HTMLButtonElement>('[data-special]');
   if (chip) {
@@ -340,6 +490,15 @@ view.addEventListener('click', (e) => {
   const pad = el.closest<HTMLButtonElement>('.pad');
   if (pad) {
     const step = { root: Number(pad.dataset.root), type: pad.dataset.type as ChordType };
+    if (pad.dataset.index !== undefined && ui.loop) {
+      const st = sequence[Number(pad.dataset.index)];
+      const k = DURS.findIndex(([v]) => v === (st.dur ?? 1));
+      st.dur = DURS[(k + 1) % DURS.length][0];
+      saveSeq();
+      renderSequence();
+      refreshActive();
+      return;
+    }
     if (pad.dataset.index !== undefined) {
       const i = Number(pad.dataset.index);
       if (i === seqIndex && activeKey === keyOf(step)) {
@@ -356,18 +515,29 @@ view.addEventListener('click', (e) => {
     return;
   }
   const id = el.closest('button')?.id;
-  if (id === 'seq-next') goSeq(seqIndex + 1);
+  if (id === 'loop-toggle') {
+    ui.loop = !ui.loop;
+    save('ui', ui);
+    if (!ui.loop) stopLoop();
+    renderRhythm();
+    render();
+  } else if (id === 'loop-play') {
+    if (engine.looping) stopLoop();
+    else startLoop();
+  } else if (id === 'seq-next') goSeq(seqIndex + 1);
   else if (id === 'seq-prev') goSeq(seqIndex - 1);
   else if (id === 'seq-add') openPicker();
   else if (id === 'seq-undo') {
     sequence.pop();
     if (seqIndex >= sequence.length) seqIndex = sequence.length - 1;
+    if (loopIndex >= sequence.length) loopIndex = -1;
     saveSeq();
     render();
   } else if (id === 'seq-clear') {
     if (confirm('Limpar a sequência?')) {
       sequence = [];
       seqIndex = -1;
+      stopLoop();
       saveSeq();
       render();
     }
@@ -478,7 +648,7 @@ picker.addEventListener('click', (e) => {
   }
   const r = el.closest<HTMLElement>('[data-pick-root]');
   if (r) {
-    sequence.push({ root: Number(r.dataset.pickRoot), type: pickType });
+    sequence.push({ root: Number(r.dataset.pickRoot), type: pickType, dur: 1 });
     saveSeq();
     r.classList.add('flash');
     setTimeout(() => r.classList.remove('flash'), 250);
@@ -493,9 +663,11 @@ const DIRS: [ArpDir, string][] = [
   ['updown', 'Sobe e desce'],
   ['random', 'Aleatória'],
 ];
-const DIVS: [4 | 8 | 16, string][] = [
+const DIVS: [NoteDiv, string][] = [
+  [2, 'Mínima'],
   [4, 'Semínima'],
   [8, 'Colcheia'],
+  [12, 'Tercina'],
   [16, 'Semicolcheia'],
 ];
 const chipRow = <T extends string | number>(attr: string, items: [T, string][], current: T) =>
@@ -505,9 +677,12 @@ function renderRhythm() {
   document.querySelectorAll<HTMLButtonElement>('#modes button').forEach((b) => {
     b.classList.toggle('on', b.dataset.mode === rhythm.mode);
   });
-  $('#tempo').hidden = rhythm.mode === 'pad';
+  // O loop usa o tempo mesmo no modo Pad.
+  const usesTempo = rhythm.mode !== 'pad' || ui.loop;
+  $('#tempo').hidden = !usesTempo;
   $('#bpm-label').textContent = `♩ ${rhythm.bpm}`;
-  $('#rhythm-section').hidden = rhythm.mode === 'pad';
+  $('#rhythm-section').hidden = !usesTempo;
+  $('#div-section').hidden = rhythm.mode === 'pad';
   $('#arp-section').hidden = rhythm.mode !== 'arp';
   $<HTMLInputElement>('#bpm').value = String(rhythm.bpm);
   $('#o-bpm').textContent = `${rhythm.bpm} BPM`;
@@ -515,7 +690,7 @@ function renderRhythm() {
   $('#arp-notes-desc').textContent = ARP_NOTE_LABELS.slice(0, rhythm.arpNotes).join(' ');
   $('#arp-oct').innerHTML = chipRow('arp-oct', [[1, '1'], [2, '2'], [3, '3']], rhythm.arpOctaves);
   $('#arp-dir').innerHTML = chipRow('arp-dir', DIRS, rhythm.arpDir);
-  $('#arp-div').innerHTML = chipRow('arp-div', DIVS, rhythm.arpDiv);
+  $('#note-div').innerHTML = chipRow('note-div', DIVS, rhythm.div);
 }
 
 function setRhythm(patch: Partial<RhythmSettings>) {
@@ -533,14 +708,14 @@ $('#modes').addEventListener('click', (e) => {
 
 $('#bpm').addEventListener('input', (e) => setRhythm({ bpm: Number((e.target as HTMLInputElement).value) }));
 
-$('#arp-section').addEventListener('click', (e) => {
+$('#rhythm-section').addEventListener('click', (e) => {
   const el = (e.target as HTMLElement).closest<HTMLElement>('.chip');
   if (!el) return;
   const d = el.dataset;
   if (d.arpNotes) setRhythm({ arpNotes: Number(d.arpNotes) });
   else if (d.arpOct) setRhythm({ arpOctaves: Number(d.arpOct) });
   else if (d.arpDir) setRhythm({ arpDir: d.arpDir as ArpDir });
-  else if (d.arpDiv) setRhythm({ arpDiv: Number(d.arpDiv) as 4 | 8 | 16 });
+  else if (d.noteDiv) setRhythm({ div: Number(d.noteDiv) as NoteDiv });
 });
 
 // Tap tempo: média dos últimos intervalos (uma pausa de mais de 2 s recomeça a contagem).

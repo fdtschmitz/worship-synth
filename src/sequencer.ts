@@ -2,6 +2,8 @@ import { CHORDS, padVoicing, type ChordType } from './chords';
 
 export type PlayMode = 'pad' | 'broken' | 'arp';
 export type ArpDir = 'up' | 'down' | 'updown' | 'random';
+/** Figura de cada nota, em notas por semibreve: 2 = mínima, 4 = semínima, 8 = colcheia, 12 = tercina, 16 = semicolcheia. */
+export type NoteDiv = 2 | 4 | 8 | 12 | 16;
 
 export interface RhythmSettings {
   mode: PlayMode;
@@ -9,27 +11,27 @@ export interface RhythmSettings {
   arpNotes: number; // 1 = tônica, 2 = +3ª, 3 = +5ª, 4 = +7ª, 5 = +9ª, 6 = +11ª/13ª
   arpOctaves: number;
   arpDir: ArpDir;
-  arpDiv: 4 | 8 | 16; // figura de cada nota: semínima, colcheia, semicolcheia
+  div: NoteDiv; // duração de cada nota nos modos Dedilhado e Arpejo
 }
 
 export interface NoteEvent {
   note: number;
-  beats: number; // duração, em tempos
+  len: number; // duração, em passos
   vel: number; // 0..1
 }
 
-/** Duração de um passo do sequenciador, em segundos. */
+/** Duração de um passo do sequenciador (uma nota), em segundos. */
 export function stepSeconds(r: RhythmSettings): number {
-  const beat = 60 / r.bpm;
-  return r.mode === 'broken' ? beat / 2 : (beat * 4) / r.arpDiv;
+  return ((60 / r.bpm) * 4) / r.div;
 }
 
 // ---------- Dedilhado (broken chord) ----------
 
 /**
- * Compasso 4/4 em colcheias (8 passos): baixo, quinta, oitava, terça acima,
- * nota mais aguda, e volta descendo. O baixo soa o compasso inteiro e as
- * outras notas se sobrepõem, como um piano com pedal.
+ * Padrão de 8 notas (em colcheias, um compasso 4/4): baixo, quinta, oitava,
+ * terça acima, nota mais aguda, e volta descendo. O baixo soa o padrão
+ * inteiro e as outras notas se sobrepõem, como um piano com pedal. A figura
+ * escolhida muda a duração de cada passo, mantendo o desenho.
  */
 export function brokenStep(root: number, type: ChordType, i: number): NoteEvent[] {
   const step = i % 8;
@@ -46,7 +48,7 @@ export function brokenStep(root: number, type: ChordType, i: number): NoteEvent[
   const X = ext !== undefined ? T + ((((bass + ext) % 12) - (T % 12) + 12) % 12 || 12) : base + 12 + fifth;
   const pattern = [bass, F, O, T, X, T, O, F];
   const vel = step === 0 ? 1 : step % 2 === 0 ? 0.85 : 0.68;
-  const events: NoteEvent[] = [{ note: pattern[step], beats: step === 0 ? 4 : 1.5, vel }];
+  const events: NoteEvent[] = [{ note: pattern[step], len: step === 0 ? 8 : 3, vel }];
   return events;
 }
 

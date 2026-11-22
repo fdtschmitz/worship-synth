@@ -36,7 +36,7 @@ export function brokenStep(root: number, type: ChordType, i: number): NoteEvent[
   const bass = padVoicing(root, type).body[0];
   const iv = CHORDS[type].intervals;
   const base = bass + 12;
-  const fifth = iv.includes(7) ? 7 : iv[iv.length - 1];
+  const fifth = iv.includes(7) ? 7 : iv.includes(6) ? 6 : iv[iv.length - 1]; // diminutos: 5ª diminuta
   const third = iv[1] < 7 ? iv[1] : fifth; // em "5" (sem terça) usa a quinta
   const ext = iv.find((x) => x > 7); // 7ª ou 9ª, se houver
   const F = base + fifth;
@@ -65,6 +65,9 @@ const STACKS: Record<ChordType, number[]> = {
   maj7: [0, 4, 7, 11, 2, 9],
   m7: [0, 3, 7, 10, 2, 5],
   '5': [0, 7, 2, 9, 5, 11],
+  // Diminutos: tensões da escala diminuta (tom-semitom): 9ª e 11ª
+  dim: [0, 3, 6, 9, 2, 5],
+  dim7: [0, 3, 6, 9, 2, 5],
 };
 
 export const ARP_NOTE_LABELS = ['Tônica', '+ 3ª', '+ 5ª', '+ 7ª', '+ 9ª', '+ 11ª/13ª'];

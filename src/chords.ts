@@ -1,6 +1,6 @@
 export const NOTE_NAMES = ['C', 'C#', 'D', 'Eb', 'E', 'F', 'F#', 'G', 'Ab', 'A', 'Bb', 'B'];
 
-export type ChordType = 'maj' | 'min' | 'sus2' | 'sus4' | 'add9' | 'maj7' | 'm7' | '5';
+export type ChordType = 'maj' | 'min' | 'sus2' | 'sus4' | 'add9' | 'maj7' | 'm7' | '5' | 'dim' | 'dim7';
 
 export interface ChordDef {
   label: string; // sufixo exibido no botão
@@ -17,9 +17,11 @@ export const CHORDS: Record<ChordType, ChordDef> = {
   maj7: { label: '7M', name: '7M', intervals: [0, 4, 7, 11] },
   m7: { label: 'm7', name: 'm7', intervals: [0, 3, 7, 10] },
   '5': { label: '5', name: 'Quinta', intervals: [0, 7] },
+  dim: { label: '°', name: 'Diminuto (°)', intervals: [0, 3, 6] },
+  dim7: { label: '°7', name: 'Diminuto 7 (°7)', intervals: [0, 3, 6, 9] },
 };
 
-export const SPECIAL_TYPES: ChordType[] = ['sus2', 'sus4', 'add9', 'maj7', 'm7', '5'];
+export const SPECIAL_TYPES: ChordType[] = ['sus2', 'sus4', 'add9', 'maj7', 'm7', 'dim', 'dim7', '5'];
 
 export function chordLabel(root: number, type: ChordType): string {
   return NOTE_NAMES[root] + CHORDS[type].label;

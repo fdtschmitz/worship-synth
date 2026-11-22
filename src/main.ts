@@ -2,6 +2,14 @@ import './style.css';
 import { PadEngine, type PadSettings } from './audio';
 import { CHORDS, NOTE_NAMES, SPECIAL_TYPES, chordLabel, type ChordType } from './chords';
 import { ARP_NOTE_LABELS, type ArpDir, type PlayMode, type RhythmSettings } from './sequencer';
+import {
+  clearStoredSamples,
+  downloadSampleSets,
+  isStoragePersistent,
+  offlineSupported,
+  requestPersistentStorage,
+  storedSampleSets,
+} from './samples';
 import { TIMBRES, sampleWarning, timbreById } from './timbres';
 
 type Tab = 'maj' | 'min' | 'special' | 'seq';
@@ -75,6 +83,7 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') {
     wakeLock = null;
     syncWakeLock();
+    prepareSamples(true); // se o navegador liberou a memória, recarrega do aparelho
   }
 });
 
@@ -84,8 +93,18 @@ const keyOf = (s: Step) => `${s.root}:${s.type}`;
 // ---------- Amostras (carregadas sob demanda) ----------
 let loadingText: string | null = null;
 
-/** Garante que as amostras do timbre atual estão carregadas. */
-async function prepareSamples() {
+// Se o contexto de áudio travou e foi recriado, o que tocava parou.
+engine.onReset = () => {
+  activeKey = null;
+  refreshActive();
+  syncWakeLock();
+};
+
+/**
+ * Garante que as amostras do timbre atual estão carregadas. `silent`: usado
+ * ao abrir/voltar ao app; uma falha não interrompe (o próximo toque tenta de novo).
+ */
+async function prepareSamples(silent = false) {
   if (!timbreById(settings.timbre).sampleSet || engine.samplesReady) return;
   loadingText = 'Carregando…';
   refreshActive();
@@ -94,8 +113,10 @@ async function prepareSamples() {
       loadingText = `Carregando ${done}/${total}`;
       refreshActive();
     });
+    requestPersistentStorage(); // pede para o navegador não apagar as amostras salvas
   } catch (err) {
     console.error(err);
+    if (silent) return;
     alert('Não foi possível carregar as amostras. Verifique a conexão.\nUsando “Cordas etéreas” no lugar.');
     await setTimbre('strings');
   } finally {
@@ -197,6 +218,14 @@ app.innerHTML = `
         </div>
       </section>
       <div id="sliders"></div>
+      <section class="section" id="offline-section">
+        <div class="field-label">Uso offline</div>
+        <p class="caption" id="offline-status"></p>
+        <div class="seq-actions">
+          <button id="offline-download" class="ghost"></button>
+          <button id="offline-clear" class="ghost">Remover</button>
+        </div>
+      </section>
     </div>
   </div>
   <div id="picker" class="sheet" hidden>
@@ -411,7 +440,10 @@ $('#sliders').addEventListener('input', (e) => {
 });
 
 const sheet = $('#sheet');
-$('#open-settings').addEventListener('click', () => (sheet.hidden = false));
+$('#open-settings').addEventListener('click', () => {
+  sheet.hidden = false;
+  renderOffline();
+});
 $('#close-settings').addEventListener('click', () => (sheet.hidden = true));
 sheet.addEventListener('click', (e) => e.target === sheet && (sheet.hidden = true));
 
@@ -527,9 +559,62 @@ $('#tap').addEventListener('click', () => {
   setRhythm({ bpm: Math.max(40, Math.min(200, Math.round(60000 / avg))) });
 });
 
+// ---------- Uso offline (amostras salvas no aparelho) ----------
+const SAMPLE_TIMBRES = TIMBRES.filter((t) => t.sampleSet);
+const SAMPLE_SETS = SAMPLE_TIMBRES.map((t) => t.sampleSet!);
+const TOTAL_MB = SAMPLE_TIMBRES.reduce((n, t) => n + (t.downloadMB ?? 0), 0);
+let downloading = false;
+
+async function renderOffline() {
+  const status = $('#offline-status');
+  const dl = $<HTMLButtonElement>('#offline-download');
+  const clear = $<HTMLButtonElement>('#offline-clear');
+  if (!offlineSupported()) {
+    status.textContent = 'Disponível apenas na versão publicada (endereço com HTTPS).';
+    dl.hidden = clear.hidden = true;
+    return;
+  }
+  if (downloading) return;
+  const stored = await storedSampleSets(SAMPLE_SETS);
+  const persistent = await isStoragePersistent();
+  const names = SAMPLE_TIMBRES.filter((t) => stored.includes(t.sampleSet!)).map((t) => t.name);
+  status.textContent =
+    `Timbres gravados salvos no aparelho: ${names.length ? names.join(', ') : 'nenhum'}. ` +
+    (persistent
+      ? 'Armazenamento permanente ativado: o navegador não apaga esses arquivos.'
+      : 'O navegador ainda não garantiu armazenamento permanente (no iPhone, instale o app na tela inicial).');
+  const all = stored.length === SAMPLE_SETS.length;
+  dl.textContent = all ? 'Tudo salvo ✓' : `Baixar todos (${String(TOTAL_MB.toFixed(1)).replace('.', ',')} MB)`;
+  dl.disabled = all;
+  clear.disabled = stored.length === 0;
+}
+
+$('#offline-download').addEventListener('click', async () => {
+  const dl = $<HTMLButtonElement>('#offline-download');
+  downloading = true;
+  dl.disabled = true;
+  try {
+    await requestPersistentStorage();
+    await downloadSampleSets(SAMPLE_SETS, (done, total) => (dl.textContent = `Baixando ${done}/${total}…`));
+  } catch (err) {
+    console.error(err);
+    alert('Não foi possível concluir o download. Verifique a conexão e tente de novo.');
+  } finally {
+    downloading = false;
+    renderOffline();
+  }
+});
+
+$('#offline-clear').addEventListener('click', async () => {
+  if (!confirm('Remover os timbres gravados salvos no aparelho? Eles serão baixados de novo quando forem usados.')) return;
+  await clearStoredSamples();
+  renderOffline();
+});
+
 renderRhythm();
 renderTimbres();
 render();
+prepareSamples(true); // timbre gravado selecionado: já prepara ao abrir o app
 
 if (import.meta.env.PROD && 'serviceWorker' in navigator) {
   navigator.serviceWorker.register('./sw.js').catch(() => {});

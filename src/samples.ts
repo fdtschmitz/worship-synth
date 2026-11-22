@@ -56,18 +56,111 @@ function measureAttack(buf: AudioBuffer, loopEnd: number): number {
   return 0;
 }
 
+// ---------- Armazenamento no aparelho ----------
+//
+// As amostras ficam num cache próprio (Cache Storage), separado do cache do
+// service worker. Com armazenamento persistente concedido, o navegador não o
+// apaga para liberar espaço; assim o app volta a tocar mesmo sem internet
+// depois que o sistema encerra a aba para economizar memória.
+
+const SAMPLE_CACHE = 'ws-samples-v1'; // trocar o número ao regerar as amostras
+const hasCache = () => typeof caches !== 'undefined'; // exige HTTPS (ou localhost)
+
+const setBase = (name: string) => new URL(`${import.meta.env.BASE_URL}samples/${name}/`, location.href).href;
+
+/** Busca no cache do aparelho; se não houver, baixa e guarda. */
+async function cachedFetch(url: string): Promise<Response> {
+  if (hasCache()) {
+    try {
+      const cache = await caches.open(SAMPLE_CACHE);
+      const hit = await cache.match(url);
+      if (hit) return hit;
+      const res = await fetch(url);
+      if (res.ok) await cache.put(url, res.clone());
+      return res;
+    } catch {
+      /* cache indisponível: segue pela rede */
+    }
+  }
+  return fetch(url);
+}
+
+async function readManifest(name: string): Promise<{ file: string; note: number }[]> {
+  const res = await cachedFetch(setBase(name) + 'manifest.json');
+  if (!res.ok) throw new Error(`${name}/manifest.json: HTTP ${res.status}`);
+  return res.json();
+}
+
+export const offlineSupported = hasCache;
+
+/** Pede ao navegador que não apague os dados do app. Retorna se foi concedido. */
+export async function requestPersistentStorage(): Promise<boolean> {
+  try {
+    if (!navigator.storage?.persist) return false;
+    return (await navigator.storage.persisted()) || (await navigator.storage.persist());
+  } catch {
+    return false;
+  }
+}
+
+export async function isStoragePersistent(): Promise<boolean> {
+  try {
+    return (await navigator.storage?.persisted?.()) ?? false;
+  } catch {
+    return false;
+  }
+}
+
+/** Baixa os conjuntos para o aparelho, sem decodificar (não ocupa memória). */
+export async function downloadSampleSets(names: string[], onProgress?: (done: number, total: number) => void) {
+  const files: string[] = [];
+  for (const name of names) {
+    for (const { file } of await readManifest(name)) files.push(setBase(name) + file);
+  }
+  let done = 0;
+  // Em lotes pequenos, para não saturar conexões lentas.
+  for (let i = 0; i < files.length; i += 6) {
+    await Promise.all(
+      files.slice(i, i + 6).map(async (url) => {
+        const res = await cachedFetch(url);
+        if (!res.ok) throw new Error(`${url}: HTTP ${res.status}`);
+        onProgress?.(++done, files.length);
+      }),
+    );
+  }
+}
+
+/** Quais conjuntos estão completos no aparelho. */
+export async function storedSampleSets(names: string[]): Promise<string[]> {
+  if (!hasCache()) return [];
+  const cache = await caches.open(SAMPLE_CACHE);
+  const stored: string[] = [];
+  for (const name of names) {
+    const manifest = await cache.match(setBase(name) + 'manifest.json');
+    if (!manifest) continue;
+    const list: { file: string }[] = await manifest.json();
+    const hits = await Promise.all(list.map(({ file }) => cache.match(setBase(name) + file)));
+    if (hits.every(Boolean)) stored.push(name);
+  }
+  return stored;
+}
+
+export async function clearStoredSamples() {
+  if (hasCache()) await caches.delete(SAMPLE_CACHE);
+}
+
 export async function loadSampleSet(
   ctx: BaseAudioContext,
   name: string,
   onProgress?: (done: number, total: number) => void,
   loop = true, // false: notas que decaem sozinhas (piano), tocadas até o fim
 ): Promise<SampleSet> {
-  const base = `${import.meta.env.BASE_URL}samples/${name}/`;
-  const list: { file: string; note: number }[] = await (await fetch(base + 'manifest.json')).json();
+  const base = setBase(name);
+  const list = await readManifest(name);
   let done = 0;
   const buffers = await Promise.all(
     list.map(async ({ file }) => {
-      const res = await fetch(base + file);
+      const res = await cachedFetch(base + file);
       if (!res.ok) throw new Error(`${file}: HTTP ${res.status}`);
       const buf = await ctx.decodeAudioData(await res.arrayBuffer());
       onProgress?.(++done, list.length);

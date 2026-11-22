@@ -357,11 +357,44 @@ export class PadEngine {
     private r: RhythmSettings, // lido a cada passo: mudanças valem na hora
   ) {}
 
-  /** Precisa ser chamado dentro de um gesto do usuário (exigência do iOS). */
+  /** Chamado quando o contexto de áudio precisou ser recriado (o que tocava parou). */
+  onReset: () => void = () => {};
+
+  /**
+   * Garante o áudio rodando. Precisa ser chamado dentro de um gesto do usuário
+   * (exigência do iOS). Depois de muito tempo inativo, o navegador pode deixar
+   * o contexto fechado ou "interrompido" e a retomada nunca terminar; nesse
+   * caso o contexto é recriado (as amostras já decodificadas são reaproveitadas).
+   */
   async unlock() {
+    if (this.ctx?.state === 'closed') this.reset();
     if (!this.ctx) this.init();
-    const ctx = this.ctx!;
-    if (ctx.state !== 'running') await ctx.resume();
+    if (await this.tryResume(this.ctx!)) return;
+    this.reset();
+    this.init();
+    await this.tryResume(this.ctx!);
+  }
+
+  private async tryResume(ctx: AudioContext): Promise<boolean> {
+    if (ctx.state === 'running') return true;
+    try {
+      await Promise.race([ctx.resume(), new Promise((r) => setTimeout(r, 1500))]);
+    } catch {
+      /* resume rejeitado: tratado como falha */
+    }
+    return (ctx.state as string) === 'running';
+  }
+
+  /** Descarta o contexto atual e tudo que dependia dele. */
+  private reset() {
+    if (this.timer !== null) clearInterval(this.timer);
+    this.timer = null;
+    this.active.clear();
+    this.patterns.clear();
+    const old = this.ctx;
+    this.ctx = null;
+    if (old && old.state !== 'closed') old.close().catch(() => {});
+    this.onReset();
   }
 
   private init() {
@@ -406,15 +439,18 @@ export class PadEngine {
   private loadedSamples: SampleSet | null = null;
   private samplesName: string | null = null;
 
-  /** Baixa e decodifica as amostras do timbre atual (uma vez). Exige unlock() antes. */
+  /** Baixa (ou lê do aparelho) e decodifica as amostras do timbre atual, uma vez. */
   ensureSamples(onProgress?: (done: number, total: number) => void): Promise<SampleSet> {
-    if (!this.ctx) throw new Error('AudioContext não iniciado');
+    // Decodificar não exige gesto do usuário: o contexto pode nascer suspenso.
+    if (this.ctx?.state === 'closed') this.reset();
+    if (!this.ctx) this.init();
+    const ctx = this.ctx!;
     const name = timbreById(this.s.timbre).sampleSet;
     if (!name) throw new Error('Timbre sem amostras');
     if (this.samplesName !== name) this.releaseSamples();
     if (!this.samples) {
       this.samplesName = name;
-      this.samples = loadSampleSet(this.ctx, name, onProgress, !timbreById(this.s.timbre).oneShot).then(
+      this.samples = loadSampleSet(ctx, name, onProgress, !timbreById(this.s.timbre).oneShot).then(
         (set) => {
           if (this.samplesName === name) this.loadedSamples = set;
           return set;

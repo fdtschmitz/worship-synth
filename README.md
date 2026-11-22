@@ -36,3 +36,5 @@ O tempo é ajustado por slider ou pelo botão TAP. Nos modos rítmicos, o padrã
 - Instale na tela inicial ("Adicionar à Tela de Início") para abrir em tela cheia.
 - O iOS só libera o áudio após o primeiro toque. No iOS 17+ o app toca mesmo com a chave de silencioso ligada.
 - A tela é mantida acesa enquanto um pad toca (Wake Lock API).
+- Uso offline: em Configurações → "Uso offline", os timbres gravados podem ser baixados de uma vez (~5 MB). Eles ficam num cache próprio, e o app pede armazenamento permanente ao navegador. Se o sistema encerrar a aba para liberar memória, as amostras são recarregadas do aparelho ao voltar, sem internet.
+- No iPhone, dados de sites podem ser apagados após 7 dias sem uso; apps instalados na tela inicial não têm esse limite.

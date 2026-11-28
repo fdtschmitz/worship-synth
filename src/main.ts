@@ -63,6 +63,8 @@ const rhythm: RhythmSettings = load('rhythm', {
   arpOctaves: 2,
   arpDir: 'up' as ArpDir,
   div: 8 as NoteDiv,
+  click: false,
+  clickVol: 0.6,
 });
 // Versões anteriores guardavam a figura só para o arpejo (arpDiv).
 {
@@ -244,6 +246,17 @@ app.innerHTML = `
       <div class="field-label">Timbre</div>
       <div class="chips" id="timbres"></div>
       <p class="hint" id="timbre-hint" hidden></p>
+      <section class="section">
+        <label class="switch-row">
+          <span>Click do metrônomo</span>
+          <button id="click-toggle" class="switch" role="switch"><i></i></button>
+        </label>
+        <label class="slider" id="click-vol-row">
+          <span>Volume do click</span><output id="o-click-vol"></output>
+          <input type="range" id="click-vol" min="0" max="1" step="0.01">
+        </label>
+        <p class="caption">Marca os tempos no BPM atual enquanto algo toca, com acento no 1º tempo do compasso. No loop, o 1º tempo cai junto com o 1º acorde.</p>
+      </section>
       <section id="rhythm-section" class="section">
         <label class="slider">
           <span>Tempo</span><output id="o-bpm"></output>
@@ -933,8 +946,14 @@ function renderRhythm() {
   document.querySelectorAll<HTMLButtonElement>('#modes button').forEach((b) => {
     b.classList.toggle('on', b.dataset.mode === rhythm.mode);
   });
-  // O loop usa o tempo mesmo no modo Pad.
-  const usesTempo = rhythm.mode !== 'pad' || ui.loop;
+  // O loop e o click usam o tempo mesmo no modo Pad.
+  const usesTempo = rhythm.mode !== 'pad' || ui.loop || rhythm.click;
+  const ct = $('#click-toggle');
+  ct.classList.toggle('on', rhythm.click);
+  ct.setAttribute('aria-checked', String(rhythm.click));
+  $('#click-vol-row').hidden = !rhythm.click;
+  $<HTMLInputElement>('#click-vol').value = String(rhythm.clickVol);
+  $('#o-click-vol').textContent = `${Math.round(rhythm.clickVol * 100)}%`;
   $('#tempo').hidden = !usesTempo;
   $('#bpm-label').textContent = `♩ ${rhythm.bpm}`;
   $('#rhythm-section').hidden = !usesTempo;
@@ -960,6 +979,18 @@ function setRhythm(patch: Partial<RhythmSettings>) {
 $('#modes').addEventListener('click', (e) => {
   const b = (e.target as HTMLElement).closest<HTMLElement>('[data-mode]');
   if (b) setRhythm({ mode: b.dataset.mode as PlayMode });
+});
+
+$('#click-toggle').addEventListener('click', async () => {
+  setRhythm({ click: !rhythm.click });
+  const playing = activeKey !== null || engine.looping;
+  if (playing) await engine.unlock();
+  engine.clickChanged(playing);
+  syncWakeLock();
+});
+$('#click-vol').addEventListener('input', (e) => {
+  setRhythm({ clickVol: Number((e.target as HTMLInputElement).value) });
+  engine.clickChanged(activeKey !== null || engine.looping);
 });
 
 $('#bpm').addEventListener('input', (e) => setRhythm({ bpm: Number((e.target as HTMLInputElement).value) }));

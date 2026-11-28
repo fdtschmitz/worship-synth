@@ -12,6 +12,8 @@ export interface RhythmSettings {
   arpOctaves: number;
   arpDir: ArpDir;
   div: NoteDiv; // duração de cada nota nos modos Dedilhado e Arpejo
+  click: boolean; // metrônomo nos tempos do BPM enquanto algo toca
+  clickVol: number; // 0..1
 }
 
 export interface NoteEvent {

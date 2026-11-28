@@ -487,6 +487,9 @@ export class PadEngine {
   private ctx: AudioContext | null = null;
   private bus!: GainNode;
   private master!: GainNode;
+  private clickOut!: GainNode; // metrônomo: direto na saída, sem reverb nem compressor
+  private click: { next: number; beat: number } | null = null;
+  private clickPending: { o: OscillatorNode; t: number }[] = [];
   private dry!: GainNode;
   private wet!: GainNode;
   private active = new Map<string, Voice>();
@@ -541,6 +544,8 @@ export class PadEngine {
     this.active.clear();
     this.patterns.clear();
     this.loop = null;
+    this.click = null;
+    this.clickPending = [];
     const old = this.ctx;
     this.ctx = null;
     if (old && old.state !== 'closed') old.close().catch(() => {});
@@ -572,6 +577,10 @@ export class PadEngine {
     this.bus.connect(this.dry).connect(comp);
     this.bus.connect(reverb).connect(this.wet).connect(comp);
     comp.connect(this.master).connect(ctx.destination);
+
+    this.clickOut = ctx.createGain();
+    this.clickOut.gain.value = this.r.clickVol;
+    this.clickOut.connect(ctx.destination);
 
     this.applyMix();
   }
@@ -666,6 +675,7 @@ export class PadEngine {
       const v = new PadVoice(ctx, this.bus, this.s, timbre, samples, root, type, bass);
       this.active.set(key, v);
       v.fadeIn(isStruck(timbre) ? 0.01 : this.s.fadeIn); // piano: o ataque é a própria nota
+      if (!this.click) this.startClick(ctx.currentTime + 0.02); // no Pad, o click segue entre acordes
       return;
     }
 
@@ -692,6 +702,7 @@ export class PadEngine {
     this.active.set(key, v);
     v.fadeIn(this.s.fadeIn);
     v.next = ctx.currentTime + 0.02; // o compasso começa no toque
+    this.startClick(v.next); // o click acompanha o novo compasso
     this.ensureTimer();
     this.tick();
   }
@@ -717,7 +728,21 @@ export class PadEngine {
         p.next += dur;
       }
     }
-    if (!L && ![...this.patterns].some((p) => p.generatingAt(now))) {
+    const C = this.click;
+    if (C) {
+      const beat = 60 / this.r.bpm;
+      while (C.next < now) {
+        // Aba em segundo plano: pula os tempos perdidos sem perder o compasso.
+        C.next += beat;
+        C.beat++;
+      }
+      while (C.next < now + LOOKAHEAD) {
+        this.scheduleClick(C.next, C.beat % 4 === 0);
+        C.next += 60 / this.r.bpm;
+        C.beat++;
+      }
+    }
+    if (!L && !this.click && ![...this.patterns].some((p) => p.generatingAt(now))) {
       clearInterval(this.timer!);
       this.timer = null;
     }
@@ -744,8 +769,60 @@ export class PadEngine {
     bus.connect(this.bus);
     fade(ctx, bus.gain, 1, isStruck(timbreById(this.s.timbre)) ? 0.01 : this.s.fadeIn);
     this.loop = { steps, i: 0, next: ctx.currentTime + 0.05, bus, voices: [], onStep };
+    this.startClick(this.loop.next); // 1º tempo junto com o 1º acorde
     this.ensureTimer();
     this.tick();
+  }
+
+  // ---------- Metrônomo ----------
+
+  /** Começa o click em `t`, que conta como 1º tempo do compasso. */
+  private startClick(t: number) {
+    if (!this.r.click || !this.ctx) return;
+    this.cancelPendingClicks();
+    this.click = { next: t, beat: 0 };
+    this.ensureTimer();
+  }
+
+  private stopClick() {
+    this.click = null;
+    this.cancelPendingClicks();
+  }
+
+  /** Cancela os clicks já agendados que ainda não soaram. */
+  private cancelPendingClicks() {
+    const now = this.ctx?.currentTime ?? 0;
+    for (const p of this.clickPending) if (p.t > now) p.o.stop();
+    this.clickPending = [];
+  }
+
+  private scheduleClick(t: number, accent: boolean) {
+    const ctx = this.ctx!;
+    const o = ctx.createOscillator();
+    o.frequency.value = accent ? 1760 : 1250;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0, t);
+    g.gain.linearRampToValueAtTime(accent ? 1 : 0.6, t + 0.001);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.045);
+    o.connect(g).connect(this.clickOut);
+    o.start(t);
+    o.stop(t + 0.05);
+    o.onended = () => g.disconnect();
+    const now = ctx.currentTime;
+    this.clickPending = this.clickPending.filter((p) => p.t > now);
+    this.clickPending.push({ o, t });
+  }
+
+  /** Opções do click mudaram (liga/desliga/volume); `playing`: algo está tocando. */
+  clickChanged(playing: boolean) {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    this.clickOut.gain.setTargetAtTime(this.r.clickVol, ctx.currentTime, 0.02);
+    if (!this.r.click) this.stopClick();
+    else if (playing && !this.click) {
+      // No loop, o 1º tempo cai na próxima troca de acorde.
+      this.startClick(this.loop ? this.loop.next : ctx.currentTime + 0.05);
+    }
   }
 
   /** Atualiza os passos com o loop tocando (vale a partir da próxima troca). */
@@ -758,6 +835,7 @@ export class PadEngine {
     const L = this.loop;
     if (!L || !this.ctx) return;
     this.loop = null;
+    this.stopClick();
     fade(this.ctx, L.bus.gain, 0, this.s.fadeOut);
     for (const v of L.voices) v.fadeOut(this.s.fadeOut + 0.05, true);
     setTimeout(() => L.bus.disconnect(), (this.s.fadeOut + 0.5) * 1000);
@@ -798,9 +876,11 @@ export class PadEngine {
     if (!v) return;
     this.active.delete(key);
     v.fadeOut(this.s.fadeOut); // nos modos rítmicos o padrão segue tocando durante o fade
+    if (!this.active.size && !this.loop) this.stopClick();
   }
 
   stopAll() {
     for (const k of [...this.active.keys()]) this.stop(k);
+    if (!this.loop) this.stopClick();
   }
 }

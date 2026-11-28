@@ -1,6 +1,7 @@
 import './style.css';
 import { PadEngine, type PadSettings } from './audio';
 import { CHORDS, NOTE_NAMES, SPECIAL_TYPES, chordLabel, type ChordType } from './chords';
+import { suggestTransitions, type Suggestion } from './harmony';
 import { ARP_NOTE_LABELS, type ArpDir, type NoteDiv, type PlayMode, type RhythmSettings } from './sequencer';
 import {
   clearStoredSamples,
@@ -16,6 +17,7 @@ type Tab = 'maj' | 'min' | 'special' | 'seq';
 interface Step {
   root: number;
   type: ChordType;
+  bass?: number; // baixo, em inversões (ex.: D/F#)
   dur?: number; // duração no loop, em compassos de 4/4 (padrão 1)
 }
 
@@ -71,7 +73,17 @@ const rhythm: RhythmSettings = load('rhythm', {
     save('rhythm', rhythm);
   }
 }
-const ui = load('ui', { tab: 'maj' as Tab, special: 'sus2' as ChordType, loop: false });
+// bass: baixo escolhido nas abas de acordes (-1 = fundamental).
+const ui = load('ui', { tab: 'maj' as Tab, special: 'sus2' as ChordType, bass: -1, loop: false });
+// A versão anterior guardava o baixo só da aba Especiais.
+{
+  const old = ui as typeof ui & { specialBass?: number };
+  if (old.specialBass !== undefined) {
+    if (old.specialBass >= 0) ui.bass = old.specialBass;
+    delete old.specialBass;
+    save('ui', ui);
+  }
+}
 let sequence: Step[] = (() => {
   try {
     return JSON.parse(localStorage.getItem('sequence') || '[]');
@@ -109,7 +121,13 @@ document.addEventListener('visibilitychange', () => {
 });
 
 // ---------- Lógica de toggle ----------
-const keyOf = (s: Step) => `${s.root}:${s.type}`;
+const keyOf = (s: Step) => `${s.root}:${s.type}${s.bass !== undefined && s.bass !== s.root ? `/${s.bass}` : ''}`;
+function parseKey(key: string): Step {
+  const [r, rest] = key.split(':');
+  const [t, b] = rest.split('/');
+  return { root: Number(r), type: t as ChordType, bass: b === undefined ? undefined : Number(b) };
+}
+const stepLabel = (s: Step) => chordLabel(s.root, s.type, s.bass);
 
 // ---------- Amostras (carregadas sob demanda) ----------
 let loadingText: string | null = null;
@@ -160,8 +178,8 @@ async function setTimbre(id: string) {
 /** Recria o acorde que está tocando (troca de timbre ou de modo). */
 function restartActive() {
   if (!activeKey) return;
-  const [r, t] = activeKey.split(':');
-  engine.play(activeKey, Number(r), t as ChordType, true);
+  const st = parseKey(activeKey);
+  engine.play(activeKey, st.root, st.type, st.bass, true);
 }
 
 async function toggle(step: Step) {
@@ -173,7 +191,7 @@ async function toggle(step: Step) {
     engine.stop(key);
     activeKey = null;
   } else {
-    engine.play(key, step.root, step.type); // faz crossfade / troca de padrão
+    engine.play(key, step.root, step.type, step.bass); // faz crossfade / troca de padrão
     activeKey = key;
   }
   refreshActive();
@@ -261,7 +279,16 @@ app.innerHTML = `
     <div class="sheet-panel">
       <div class="sheet-head"><h2>Adicionar acorde</h2><button id="close-picker" class="ghost">Fechar</button></div>
       <div class="chips" id="picker-types"></div>
+      <div id="picker-bass"></div>
       <div class="grid small" id="picker-roots"></div>
+      <div id="picker-suggest"></div>
+    </div>
+  </div>
+  <div id="suggest" class="sheet" hidden>
+    <div class="sheet-panel">
+      <div class="sheet-head"><h2>Suavizar transições</h2><button id="close-suggest" class="ghost">Fechar</button></div>
+      <p class="caption">Inversões e acordes de passagem do campo harmônico para ligar um acorde ao outro. Toque numa sugestão para colocá-la na sequência.</p>
+      <div id="suggest-list"></div>
     </div>
   </div>
 `;
@@ -277,13 +304,24 @@ function render() {
   refreshActive();
 }
 
-function gridButtons(type: ChordType) {
-  return NOTE_NAMES.map(
-    (_, root) =>
-      `<button class="pad" data-key="${root}:${type}" data-root="${root}" data-type="${type}">
-        <span>${chordLabel(root, type)}</span>
-      </button>`,
-  ).join('');
+function gridButtons(type: ChordType, bass?: number) {
+  return NOTE_NAMES.map((_, root) => {
+    const st: Step = { root, type, bass: bass === undefined || bass === root ? undefined : bass };
+    return `<button class="pad" data-key="${keyOf(st)}" data-root="${root}" data-type="${type}" ${st.bass !== undefined ? `data-bass="${st.bass}"` : ''}>
+        ${labelSpan(stepLabel(st))}
+      </button>`;
+  }).join('');
+}
+
+/** Nome no botão; nomes longos (acordes com baixo) ficam menores para caber. */
+const labelSpan = (label: string) => `<span class="${label.length > 5 ? 'long' : ''}">${label}</span>`;
+
+/** Fileira de escolha do baixo: "Fundamental" (-1) ou uma das 12 notas. */
+function bassChips(attr: string, current: number) {
+  return `<div class="field-label bass-label">Baixo</div>
+    <div class="chips bass-chips">${[-1, ...NOTE_NAMES.keys()]
+      .map((b) => `<button class="chip ${b === current ? 'on' : ''}" data-${attr}="${b}">${b < 0 ? 'Fundamental' : NOTE_NAMES[b]}</button>`)
+      .join('')}</div>`;
 }
 
 function renderGrid() {
@@ -294,16 +332,18 @@ function renderGrid() {
           (t) => `<button class="chip ${t === ui.special ? 'on' : ''}" data-special="${t}">${CHORDS[t].name}</button>`,
         ).join('')}</div>`
       : '';
-  view.innerHTML = `${chips}<div class="grid">${gridButtons(type)}</div>`;
+  const bass = ui.bass >= 0 ? ui.bass : undefined;
+  view.innerHTML = `${chips}${bassChips('grid-bass', ui.bass)}<div class="grid">${gridButtons(type, bass)}</div>`;
 }
 
 function renderSequence() {
   const steps = sequence
     .map(
       (s, i) =>
-        `<button class="pad step ${!ui.loop && i === seqIndex ? 'cursor' : ''}" data-key="${keyOf(s)}" data-root="${s.root}" data-type="${s.type}" data-index="${i}">
-          <small>${i + 1}</small><span>${chordLabel(s.root, s.type)}</span>
+        `<button class="pad step ${!ui.loop && i === seqIndex ? 'cursor' : ''}" data-key="${keyOf(s)}" data-root="${s.root}" data-type="${s.type}" ${s.bass !== undefined ? `data-bass="${s.bass}"` : ''} data-index="${i}">
+          <small>${i + 1}</small>${labelSpan(stepLabel(s))}
           ${ui.loop ? `<em class="dur">${durLabel(s.dur)}</em>` : ''}
+          ${sequence.length > 1 ? '<i class="drag" aria-label="Arrastar para mudar a ordem">⠿</i>' : ''}
         </button>`,
     )
     .join('');
@@ -311,7 +351,7 @@ function renderSequence() {
     ? `<div class="seq-actions">
         <button id="loop-play" class="primary" ${sequence.length ? '' : 'disabled'}>${engine.looping ? '■ Parar loop' : '▶ Tocar loop'}</button>
       </div>
-      <p class="caption">Toque num acorde para mudar a duração (em compassos de 4/4); segure para remover. As trocas seguem o tempo e o modo atuais, sem fade.</p>`
+      <p class="caption">Toque num acorde para mudar a duração (em compassos de 4/4); segure para remover; arraste pelo ⠿ para mudar a ordem. As trocas seguem o tempo e o modo atuais, sem fade.</p>`
     : `<div class="seq-actions">
         <button id="seq-prev" class="ghost">◀ Anterior</button>
         <button id="seq-next" class="primary">Próximo ▶</button>
@@ -323,7 +363,8 @@ function renderSequence() {
     </label>
     ${controls}
     <div class="grid">${steps || '<p class="empty">Nenhum acorde na sequência.<br>Toque em “+ Adicionar”.</p>'}</div>
-    ${sequence.length && !ui.loop ? '<p class="caption">Segure um acorde para removê-lo.</p>' : ''}
+    ${sequence.length && !ui.loop ? '<p class="caption">Segure um acorde para removê-lo; arraste pelo ⠿ para mudar a ordem.</p>' : ''}
+    ${sequence.length >= 2 ? '<div class="seq-actions"><button id="seq-suggest" class="ghost">✦ Suavizar transições</button></div>' : ''}
     <div class="seq-actions">
       <button id="seq-add" class="ghost">+ Adicionar</button>
       <button id="seq-undo" class="ghost" ${sequence.length ? '' : 'disabled'}>Remover último</button>
@@ -347,10 +388,9 @@ function refreshActive() {
     $('#now').textContent = loadingText;
   } else if (looping && sequence[loopIndex]) {
     const st = sequence[loopIndex];
-    $('#now').textContent = `⟳ ${chordLabel(st.root, st.type)}`;
+    $('#now').textContent = `⟳ ${stepLabel(st)}`;
   } else if (activeKey) {
-    const [r, t] = activeKey.split(':');
-    $('#now').textContent = chordLabel(Number(r), t as ChordType);
+    $('#now').textContent = stepLabel(parseKey(activeKey));
   } else $('#now').textContent = '—';
 }
 
@@ -369,7 +409,7 @@ function saveSeq() {
   engine.setLoopSteps(loopSteps()); // edições valem a partir da próxima troca
 }
 
-const loopSteps = () => sequence.map((s) => ({ root: s.root, type: s.type, beats: (s.dur ?? 1) * 4 }));
+const loopSteps = () => sequence.map((s) => ({ root: s.root, type: s.type, bass: s.bass, beats: (s.dur ?? 1) * 4 }));
 
 async function startLoop() {
   if (!sequence.length) return;
@@ -421,6 +461,10 @@ view.addEventListener('pointerdown', (e) => {
   const pad = (e.target as HTMLElement).closest<HTMLElement>('.pad.step');
   if (!pad || pad.dataset.index === undefined) return;
   cancelHold();
+  if ((e.target as HTMLElement).closest('.drag')) {
+    startDrag(e, pad);
+    return;
+  }
   pad.classList.add('holding');
   hold = {
     pad,
@@ -443,13 +487,110 @@ view.addEventListener('contextmenu', (e) => {
   if ((e.target as HTMLElement).closest('.pad.step')) e.preventDefault(); // menu do toque longo no Android
 });
 
-let undo: { step: Step; index: number } | null = null;
+// ---------- Arrastar um acorde (pela alça ⠿) para mudar a ordem ----------
+let drag: {
+  pad: HTMLElement;
+  ghost: HTMLElement;
+  dx: number;
+  dy: number;
+  moved: boolean;
+  scroll: number; // velocidade da rolagem automática perto das bordas
+  raf: number;
+  x: number;
+  y: number;
+} | null = null;
+
+function startDrag(e: PointerEvent, pad: HTMLElement) {
+  e.preventDefault();
+  const r = pad.getBoundingClientRect();
+  const ghost = pad.cloneNode(true) as HTMLElement;
+  ghost.classList.add('drag-ghost');
+  ghost.classList.remove('holding');
+  Object.assign(ghost.style, { width: `${r.width}px`, height: `${r.height}px`, left: `${r.left}px`, top: `${r.top}px` });
+  document.body.appendChild(ghost);
+  pad.classList.add('dragging');
+  view.setPointerCapture(e.pointerId);
+  drag = { pad, ghost, dx: e.clientX - r.left, dy: e.clientY - r.top, moved: false, scroll: 0, raf: 0, x: e.clientX, y: e.clientY };
+  navigator.vibrate?.(8);
+}
+
+function dragMove(x: number, y: number) {
+  if (!drag) return;
+  drag.x = x;
+  drag.y = y;
+  drag.ghost.style.left = `${x - drag.dx}px`;
+  drag.ghost.style.top = `${y - drag.dy}px`;
+  // Acorde sob o dedo: o arrastado vai para antes ou depois dele.
+  const over = document.elementFromPoint(x, y)?.closest<HTMLElement>('.pad.step');
+  if (over && over !== drag.pad && over.parentElement === drag.pad.parentElement) {
+    const pads = [...over.parentElement!.children];
+    const from = pads.indexOf(drag.pad);
+    const to = pads.indexOf(over);
+    over.parentElement!.insertBefore(drag.pad, from < to ? over.nextSibling : over);
+    drag.moved = true;
+  }
+  // Rolagem automática perto do topo/fundo da área dos acordes.
+  const vr = view.getBoundingClientRect();
+  const edge = 60;
+  drag.scroll = y < vr.top + edge ? -(vr.top + edge - y) / 4 : y > vr.bottom - edge ? (y - (vr.bottom - edge)) / 4 : 0;
+  if (drag.scroll && !drag.raf) {
+    const tick = () => {
+      if (!drag || !drag.scroll) {
+        if (drag) drag.raf = 0;
+        return;
+      }
+      view.scrollTop += drag.scroll;
+      dragMove(drag.x, drag.y);
+      drag.raf = requestAnimationFrame(tick);
+    };
+    drag.raf = requestAnimationFrame(tick);
+  }
+}
+
+function endDrag(commit: boolean) {
+  if (!drag) return;
+  const d = drag;
+  drag = null;
+  cancelAnimationFrame(d.raf);
+  d.ghost.remove();
+  d.pad.classList.remove('dragging');
+  suppressClick = true; // tocar na alça não conta como toque no acorde
+  if (!commit || !d.moved) {
+    render();
+    return;
+  }
+  // Nova ordem = ordem dos botões na tela (cada um guarda o índice antigo).
+  const order = [...view.querySelectorAll<HTMLElement>('.pad.step')].map((b) => Number(b.dataset.index));
+  if (order.every((v, i) => v === i)) return render();
+  sequence = order.map((i) => sequence[i]);
+  if (seqIndex >= 0) seqIndex = order.indexOf(seqIndex);
+  if (loopIndex >= 0) loopIndex = order.indexOf(loopIndex);
+  saveSeq(); // com o loop tocando, a nova ordem vale a partir da próxima troca
+  render();
+}
+
+view.addEventListener('pointermove', (e) => drag && dragMove(e.clientX, e.clientY));
+view.addEventListener('pointerup', () => endDrag(true));
+view.addEventListener('pointercancel', () => endDrag(false));
+
+let undo: { sequence: Step[]; seqIndex: number } | null = null;
 let toastTimer = 0;
+
+/** Mostra o aviso com "Desfazer"; `before` é a sequência antes da mudança. */
+function showUndo(text: string, before: Step[], beforeIndex: number) {
+  undo = { sequence: before, seqIndex: beforeIndex };
+  $('#toast-text').textContent = text;
+  $('#toast').hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = window.setTimeout(() => ($('#toast').hidden = true), 4000);
+}
 
 function removeStep(i: number) {
   const step = sequence[i];
   if (!step) return;
   navigator.vibrate?.(15);
+  const before = sequence.map((s) => ({ ...s }));
+  const beforeIndex = seqIndex;
   sequence.splice(i, 1);
   if (seqIndex === i) seqIndex = -1;
   else if (seqIndex > i) seqIndex--;
@@ -457,21 +598,20 @@ function removeStep(i: number) {
   if (!sequence.length) stopLoop();
   saveSeq();
   render();
-  undo = { step, index: i };
-  $('#toast-text').textContent = `${chordLabel(step.root, step.type)} removido`;
-  $('#toast').hidden = false;
-  clearTimeout(toastTimer);
-  toastTimer = window.setTimeout(() => ($('#toast').hidden = true), 4000);
+  showUndo(`${stepLabel(step)} removido`, before, beforeIndex);
 }
 
 $('#toast-undo').addEventListener('click', () => {
   if (!undo) return;
-  sequence.splice(Math.min(undo.index, sequence.length), 0, undo.step);
-  if (seqIndex >= undo.index) seqIndex++;
+  sequence = undo.sequence;
+  seqIndex = Math.min(undo.seqIndex, sequence.length - 1);
+  loopIndex = -1;
   undo = null;
   $('#toast').hidden = true;
   saveSeq();
   render();
+  if (!$('#suggest').hidden) renderSuggest();
+  if (!$('#picker').hidden) renderPicker();
 });
 
 view.addEventListener('click', (e) => {
@@ -487,9 +627,20 @@ view.addEventListener('click', (e) => {
     render();
     return;
   }
+  const bassChip = el.closest<HTMLButtonElement>('[data-grid-bass]');
+  if (bassChip) {
+    ui.bass = Number(bassChip.dataset.gridBass);
+    save('ui', ui);
+    render();
+    return;
+  }
   const pad = el.closest<HTMLButtonElement>('.pad');
   if (pad) {
-    const step = { root: Number(pad.dataset.root), type: pad.dataset.type as ChordType };
+    const step: Step = {
+      root: Number(pad.dataset.root),
+      type: pad.dataset.type as ChordType,
+      bass: pad.dataset.bass === undefined ? undefined : Number(pad.dataset.bass),
+    };
     if (pad.dataset.index !== undefined && ui.loop) {
       const st = sequence[Number(pad.dataset.index)];
       const k = DURS.findIndex(([v]) => v === (st.dur ?? 1));
@@ -527,6 +678,7 @@ view.addEventListener('click', (e) => {
   } else if (id === 'seq-next') goSeq(seqIndex + 1);
   else if (id === 'seq-prev') goSeq(seqIndex - 1);
   else if (id === 'seq-add') openPicker();
+  else if (id === 'seq-suggest') openSuggest();
   else if (id === 'seq-undo') {
     sequence.pop();
     if (seqIndex >= sequence.length) seqIndex = sequence.length - 1;
@@ -620,15 +772,22 @@ sheet.addEventListener('click', (e) => e.target === sheet && (sheet.hidden = tru
 // ---------- Picker da sequência ----------
 const picker = $('#picker');
 let pickType: ChordType = 'maj';
+let pickBass = -1; // -1 = fundamental
+const pickBassFor = (root: number) => (pickBass < 0 || pickBass === root ? undefined : pickBass);
 const ALL_TYPES: ChordType[] = ['maj', 'min', ...SPECIAL_TYPES];
 
 function renderPicker() {
   $('#picker-types').innerHTML = ALL_TYPES.map(
     (t) => `<button class="chip ${t === pickType ? 'on' : ''}" data-pick-type="${t}">${CHORDS[t].name}</button>`,
   ).join('');
+  $('#picker-bass').innerHTML = bassChips('pick-bass', pickBass);
   $('#picker-roots').innerHTML = NOTE_NAMES.map(
-    (_, r) => `<button class="pad" data-pick-root="${r}"><span>${chordLabel(r, pickType)}</span></button>`,
+    (_, r) => `<button class="pad" data-pick-root="${r}">${labelSpan(chordLabel(r, pickType, pickBassFor(r)))}</button>`,
   ).join('');
+  // Sugestões para a passagem entre os dois últimos acordes adicionados.
+  const n = sequence.length;
+  pairSuggestions = new Map();
+  $('#picker-suggest').innerHTML = n >= 2 ? pairHTML(n - 2, 4) : '';
 }
 function openPicker() {
   renderPicker();
@@ -646,13 +805,110 @@ picker.addEventListener('click', (e) => {
     renderPicker();
     return;
   }
+  const pb = el.closest<HTMLElement>('[data-pick-bass]');
+  if (pb) {
+    pickBass = Number(pb.dataset.pickBass);
+    renderPicker();
+    return;
+  }
+  const sg = el.closest<HTMLElement>('[data-sg-pair]');
+  if (sg) {
+    applySuggestion(sg);
+    renderPicker();
+    return;
+  }
   const r = el.closest<HTMLElement>('[data-pick-root]');
   if (r) {
-    sequence.push({ root: Number(r.dataset.pickRoot), type: pickType, dur: 1 });
+    const root = Number(r.dataset.pickRoot);
+    sequence.push({ root, type: pickType, bass: pickBassFor(root), dur: 1 });
     saveSeq();
     r.classList.add('flash');
     setTimeout(() => r.classList.remove('flash'), 250);
     render();
+    renderPicker();
+  }
+});
+
+// ---------- Sugestões de passagem (inversões e acordes do campo) ----------
+const SG_KIND: Record<Suggestion['kind'], string> = {
+  dominant: 'Dominante',
+  inversion: 'Inversão',
+  walk: 'Baixo caminhando',
+  common: 'Notas em comum',
+};
+let pairSuggestions = new Map<number, Suggestion[]>();
+
+/** Sugestões entre o acorde `i` e o seguinte (o último liga ao primeiro no loop). */
+function pairHTML(i: number, max = 5): string {
+  const a = sequence[i];
+  const j = (i + 1) % sequence.length;
+  const b = sequence[j];
+  if (!a || !b || i === j) return '';
+  const list = suggestTransitions(a, b, max);
+  pairSuggestions.set(i, list);
+  if (!list.length) return '';
+  return `<div class="sg-pair">
+    <div class="field-label">${stepLabel(a)} → ${stepLabel(b)}${j === 0 ? ' <small>(volta do loop)</small>' : ''}</div>
+    <div class="sg-list">${list
+      .map(
+        (s, k) => `<button class="sg" data-sg-pair="${i}" data-sg="${k}">
+          <b>${s.action === 'replace' ? `${stepLabel(b)} → ` : ''}${stepLabel(s.chord)}</b>
+          <span class="sg-kind">${s.action === 'replace' ? 'Trocar o 2º · ' : ''}${SG_KIND[s.kind]} · baixo ${s.bassLine}</span>
+          <span class="sg-why">${s.reason}</span>
+        </button>`,
+      )
+      .join('')}</div>
+  </div>`;
+}
+
+function renderSuggest() {
+  pairSuggestions = new Map();
+  const n = sequence.length;
+  const pairs: string[] = [];
+  for (let i = 0; i < n - 1; i++) pairs.push(pairHTML(i));
+  if (ui.loop && n > 2) pairs.push(pairHTML(n - 1));
+  $('#suggest-list').innerHTML = pairs.join('') || '<p class="empty">Nenhuma sugestão para esta sequência.</p>';
+}
+
+function openSuggest() {
+  renderSuggest();
+  $('#suggest').hidden = false;
+}
+
+function applySuggestion(el: HTMLElement) {
+  const i = Number(el.dataset.sgPair);
+  const s = pairSuggestions.get(i)?.[Number(el.dataset.sg)];
+  if (!s) return;
+  const before = sequence.map((x) => ({ ...x }));
+  const beforeIndex = seqIndex;
+  const chord: Step = { root: s.chord.root, type: s.chord.type, bass: s.chord.bass };
+  const j = i + 1; // na volta do loop, entra no fim da lista
+  if (s.action === 'replace') {
+    const k = j % sequence.length;
+    sequence[k] = { ...chord, dur: sequence[k].dur };
+  } else {
+    // Acorde de passagem: meio compasso no loop.
+    sequence.splice(j, 0, { ...chord, dur: 0.5 });
+    if (seqIndex >= j) seqIndex++;
+  }
+  loopIndex = -1;
+  saveSeq();
+  render();
+  navigator.vibrate?.(10);
+  showUndo(`${stepLabel(chord)} ${s.action === 'replace' ? 'no lugar do 2º acorde' : 'adicionado'}`, before, beforeIndex);
+}
+
+const suggestSheet = $('#suggest');
+suggestSheet.addEventListener('click', (e) => {
+  const el = e.target as HTMLElement;
+  if (el === suggestSheet || el.closest('#close-suggest')) {
+    suggestSheet.hidden = true;
+    return;
+  }
+  const sg = el.closest<HTMLElement>('[data-sg-pair]');
+  if (sg) {
+    applySuggestion(sg);
+    renderSuggest();
   }
 });
 

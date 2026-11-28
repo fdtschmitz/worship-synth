@@ -1,4 +1,4 @@
-import { CHORDS, padVoicing, type ChordType } from './chords';
+import { CHORDS, bassNote, type ChordType } from './chords';
 
 export type PlayMode = 'pad' | 'broken' | 'arp';
 export type ArpDir = 'up' | 'down' | 'updown' | 'random';
@@ -33,9 +33,10 @@ export function stepSeconds(r: RhythmSettings): number {
  * inteiro e as outras notas se sobrepõem, como um piano com pedal. A figura
  * escolhida muda a duração de cada passo, mantendo o desenho.
  */
-export function brokenStep(root: number, type: ChordType, i: number): NoteEvent[] {
+export function brokenStep(root: number, type: ChordType, i: number, slashBass?: number): NoteEvent[] {
   const step = i % 8;
-  const bass = padVoicing(root, type).body[0];
+  const bass = bassNote(root); // o desenho é montado sobre a fundamental
+  const low = bassNote(root, slashBass); // em inversões, a primeira nota é o baixo indicado
   const iv = CHORDS[type].intervals;
   const base = bass + 12;
   const fifth = iv.includes(7) ? 7 : iv.includes(6) ? 6 : iv[iv.length - 1]; // diminutos: 5ª diminuta
@@ -46,7 +47,7 @@ export function brokenStep(root: number, type: ChordType, i: number): NoteEvent[
   const T = base + 12 + third;
   // Ponto mais agudo: a extensão (7ª/9ª) logo acima da terça; sem extensão, a quinta.
   const X = ext !== undefined ? T + ((((bass + ext) % 12) - (T % 12) + 12) % 12 || 12) : base + 12 + fifth;
-  const pattern = [bass, F, O, T, X, T, O, F];
+  const pattern = [low, F, O, T, X, T, O, F];
   const vel = step === 0 ? 1 : step % 2 === 0 ? 0.85 : 0.68;
   const events: NoteEvent[] = [{ note: pattern[step], len: step === 0 ? 8 : 3, vel }];
   return events;
@@ -74,11 +75,13 @@ const STACKS: Record<ChordType, number[]> = {
 
 export const ARP_NOTE_LABELS = ['Tônica', '+ 3ª', '+ 5ª', '+ 7ª', '+ 9ª', '+ 11ª/13ª'];
 
-export function arpPool(root: number, type: ChordType, size: number, octaves: number): number[] {
+export function arpPool(root: number, type: ChordType, size: number, octaves: number, slashBass?: number): number[] {
   let base = 60 + root; // C4
   if (root >= 6) base -= 12;
   const pcs = [...new Set(STACKS[type].slice(0, size).map((x) => x % 12))].sort((a, b) => a - b);
   const pool: number[] = [];
+  // Inversão: o baixo indicado entra como a nota mais grave do arpejo.
+  if (slashBass !== undefined && slashBass !== root) pool.push(base - 12 + ((slashBass - root + 12) % 12));
   for (let o = 0; o < octaves; o++) for (const pc of pcs) pool.push(base + pc + 12 * o);
   return pool;
 }

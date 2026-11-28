@@ -1,12 +1,13 @@
 import { midiToHz, padVoicing, type ChordType } from './chords';
 import { fitNote, loadSampleSet, nearest, type SampleSet } from './samples';
 import { arpIndex, arpPool, brokenStep, stepSeconds, type NoteEvent, type RhythmSettings } from './sequencer';
-import { timbreById, type Layer, type Timbre } from './timbres';
+import { isStruck, timbreById, type Layer, type Timbre } from './timbres';
 
 /** Um acorde do loop e sua duração, em tempos. */
 export interface LoopStep {
   root: number;
   type: ChordType;
+  bass?: number; // baixo, em inversões (ex.: D/F#)
   beats: number;
 }
 
@@ -92,7 +93,20 @@ abstract class Voice {
 
     this.bodyBus = ctx.createGain();
     this.bodyBus.gain.value = bodyGain;
-    this.bodyBus.connect(this.filter);
+    if (timbre.formants) {
+      // Coral: formantes da vogal em paralelo, somados antes do filtro principal.
+      for (const f of timbre.formants) {
+        const bp = ctx.createBiquadFilter();
+        bp.type = 'bandpass';
+        bp.frequency.value = f.freq;
+        bp.Q.value = f.q;
+        const g = ctx.createGain();
+        g.gain.value = f.gain;
+        this.bodyBus.connect(bp).connect(g).connect(this.filter);
+      }
+    } else {
+      this.bodyBus.connect(this.filter);
+    }
 
     this.shimmerGain = ctx.createGain();
     this.shimmerGain.gain.value = s.shimmer * 0.09;
@@ -107,8 +121,24 @@ abstract class Voice {
     }
   }
 
-  cutoff() {
+  /** Cutoff vindo do slider "Brilho", ajustado pelo timbre. */
+  protected baseCutoff() {
     return cutoffFor(this.s.brightness) * this.timbre.cutoffScale;
+  }
+
+  cutoff() {
+    return this.baseCutoff();
+  }
+
+  /** Envelope de filtro (metais) num parâmetro de cutoff, a partir de `t`. */
+  protected filterHit(param: AudioParam, t: number) {
+    const fe = this.timbre.filterEnv;
+    if (!fe) return;
+    const c = this.baseCutoff();
+    param.cancelScheduledValues(t);
+    param.setValueAtTime(c * fe.start, t);
+    param.exponentialRampToValueAtTime(c * fe.peak, t + fe.attack);
+    param.setTargetAtTime(c, t + fe.attack, fe.decay / 3);
   }
 
   level() {
@@ -171,9 +201,23 @@ abstract class Voice {
         const spreadPos = layer.voices === 1 ? 0 : v / (layer.voices - 1) - 0.5;
         o.detune.value = shift + spreadPos * layer.spread + (Math.random() * 4 - 2);
         o.connect(g);
-        o.start(when + Math.random() * 0.02);
+        const start = layer.fm ? when : when + Math.random() * 0.02; // FM: fase junto com o modulador
+        o.start(start);
         this.track(o);
         created.push(o);
+        if (layer.fm) {
+          const { ratio, index, sustain, time = 1 } = layer.fm;
+          const fc = f * Math.pow(2, shift / 1200);
+          const m = this.ctx.createOscillator();
+          m.frequency.value = fc * ratio;
+          const mg = this.ctx.createGain();
+          mg.gain.setValueAtTime(fc * index, start);
+          if (sustain !== undefined) mg.gain.setTargetAtTime(fc * index * sustain, start, time / 3);
+          m.connect(mg).connect(o.frequency);
+          m.start(start);
+          this.track(m);
+          created.push(m);
+        }
         if (layer.vibrato) vibTargets[n++ % 3].push(o.detune);
       }
     }
@@ -186,7 +230,14 @@ abstract class Voice {
 
   fadeIn(seconds: number) {
     const from = this.level();
-    fade(this.ctx, this.env.gain, 1, seconds);
+    if (this.timbre.reverse && from < 0.5) {
+      // Crescendo exponencial: começa quase inaudível e acelera no fim.
+      const now = this.ctx.currentTime;
+      const g = this.env.gain;
+      g.cancelScheduledValues(now);
+      g.setValueAtTime(Math.max(from, 0.005), now);
+      g.exponentialRampToValueAtTime(1, now + Math.max(1.5, seconds));
+    } else fade(this.ctx, this.env.gain, 1, seconds);
     if (this.timbre.swell && from < 0.5) {
       // Ataque de arco: o filtro abre do escuro até o brilho configurado.
       const now = this.ctx.currentTime;
@@ -209,11 +260,19 @@ abstract class Voice {
     };
   }
 
-  /** Entrada direta em `t` (loop): sem fade, só uma rampa curta contra estalos. */
-  enterAt(t: number, ramp = 0.015) {
+  /**
+   * Entrada direta em `t` (loop): sem fade, só uma rampa curta contra estalos.
+   * Timbre reverso: cresce ao longo de quase todo o acorde (`dur` segundos).
+   */
+  enterAt(t: number, dur = 0, ramp = 0.015) {
     const g = this.env.gain;
     g.cancelScheduledValues(0);
     g.setValueAtTime(0, this.ctx.currentTime);
+    if (this.timbre.reverse && dur > 0.2) {
+      g.setValueAtTime(0.005, t);
+      g.exponentialRampToValueAtTime(1, t + dur * 0.92);
+      return;
+    }
     g.setValueAtTime(0, t);
     g.linearRampToValueAtTime(1, t + ramp);
   }
@@ -244,9 +303,10 @@ class PadVoice extends Voice {
     samples: SampleSet | null,
     root: number,
     type: ChordType,
+    bass: number | undefined,
     when = ctx.currentTime, // no loop, a voz é criada antes e começa na divisa
   ) {
-    let { body, shimmer } = padVoicing(root, type);
+    let { body, shimmer } = padVoicing(root, type, bass);
     if (samples) {
       // Encaixa na extensão do instrumento e remove notas repetidas.
       body = [...new Set(body.map((n) => fitNote(samples, n)))];
@@ -273,6 +333,14 @@ class PadVoice extends Voice {
     } else {
       for (const layer of timbre.body) this.addLayer(layer, body, this.bodyBus, now);
       for (const layer of timbre.shimmer) this.addLayer(layer, shimmer, this.shimmerGain, now);
+      this.filterHit(this.filter.frequency, now);
+      if (timbre.decay) {
+        // Percussivo (piano elétrico, sinos): o acorde decai sozinho.
+        const g = this.bodyBus.gain;
+        const v = g.value;
+        g.setValueAtTime(v, now);
+        g.setTargetAtTime(v * timbre.decay.sustain, now, timbre.decay.time / 3);
+      }
     }
   }
 }
@@ -294,6 +362,7 @@ class PatternVoice extends Voice {
     private r: RhythmSettings,
     private root: number,
     private type: ChordType,
+    private bass?: number,
   ) {
     // Ganho por nota: no Dedilhado várias notas se sobrepõem; no Arpejo, menos.
     super(
@@ -308,6 +377,12 @@ class PatternVoice extends Voice {
 
   generatingAt(t: number) {
     return t < this.genEnd && t < this.hardEnd;
+  }
+
+  /** Metais: cada nota tem o próprio filtro; o principal fica aberto até o pico. */
+  cutoff() {
+    const fe = this.timbre.filterEnv;
+    return fe ? this.baseCutoff() * fe.peak : this.baseCutoff();
   }
 
   leaveAt(t: number, ramp = 0.06) {
@@ -327,10 +402,10 @@ class PatternVoice extends Voice {
     let events: NoteEvent[];
     let release: number;
     if (this.r.mode === 'broken') {
-      events = brokenStep(this.root, this.type, this.i);
+      events = brokenStep(this.root, this.type, this.i, this.bass);
       release = 0.6;
     } else {
-      const pool = arpPool(this.root, this.type, this.r.arpNotes, this.r.arpOctaves);
+      const pool = arpPool(this.root, this.type, this.r.arpNotes, this.r.arpOctaves, this.bass);
       const idx = arpIndex(pool.length, this.r.arpDir, this.i, this.prevIdx);
       this.prevIdx = idx;
       const stepsPerBeat = Math.max(1, this.r.div / 4);
@@ -343,14 +418,29 @@ class PatternVoice extends Voice {
 
   private playNote(note: number, time: number, dur: number, vel: number, release: number) {
     if (this.samples) note = fitNote(this.samples, note);
-    const atk = this.samples ? 0.012 : this.timbre.noteAttack ?? 0.02;
+    const t = this.timbre;
+    const reverse = !this.samples && t.reverse;
+    const atk = this.samples ? 0.012 : reverse ? Math.max(0.03, dur * 0.85) : t.noteAttack ?? 0.02;
+    if (reverse) release = 0.06; // nota "ao contrário": cresce e é cortada
     const hold = time + Math.max(atk, dur);
     const g = this.ctx.createGain();
-    g.gain.setValueAtTime(0, time);
-    g.gain.linearRampToValueAtTime(vel, time + atk);
-    g.gain.setValueAtTime(vel, hold);
+    if (reverse) {
+      g.gain.setValueAtTime(0.001, time);
+      g.gain.exponentialRampToValueAtTime(vel, time + atk);
+    } else {
+      g.gain.setValueAtTime(0, time);
+      g.gain.linearRampToValueAtTime(vel, time + atk);
+    }
+    if (!this.samples && t.decay) g.gain.setTargetAtTime(vel * t.decay.sustain, time + atk, t.decay.time / 3);
+    else g.gain.setValueAtTime(vel, hold);
     g.gain.setTargetAtTime(0, hold, release / 4);
-    g.connect(this.bodyBus);
+    if (!this.samples && t.filterEnv) {
+      const lp = this.ctx.createBiquadFilter();
+      lp.type = 'lowpass';
+      lp.Q.value = t.filterQ;
+      this.filterHit(lp.frequency, time);
+      g.connect(lp).connect(this.bodyBus);
+    } else g.connect(this.bodyBus);
     const end = Math.min(hold + release * 1.5, this.hardEnd);
     // Amostras começam já no som sustentado (o crescendo lento do arco não
     // caberia numa colcheia); o ataque curto do envelope dá a articulação.
@@ -563,7 +653,7 @@ export class PadEngine {
    * abafado. `force` recria a voz mesmo se o acorde já estiver tocando
    * (troca de timbre ou de modo).
    */
-  play(key: string, root: number, type: ChordType, force = false) {
+  play(key: string, root: number, type: ChordType, bass?: number, force = false) {
     const ctx = this.ctx;
     if (!ctx || (this.active.has(key) && !force)) return;
     const timbre = timbreById(this.s.timbre);
@@ -573,9 +663,9 @@ export class PadEngine {
     if (this.r.mode === 'pad') {
       for (const v of this.active.values()) v.fadeOut(this.s.fadeOut);
       this.active.clear();
-      const v = new PadVoice(ctx, this.bus, this.s, timbre, samples, root, type);
+      const v = new PadVoice(ctx, this.bus, this.s, timbre, samples, root, type, bass);
       this.active.set(key, v);
-      v.fadeIn(timbre.oneShot ? 0.01 : this.s.fadeIn); // piano: o ataque é a própria nota
+      v.fadeIn(isStruck(timbre) ? 0.01 : this.s.fadeIn); // piano: o ataque é a própria nota
       return;
     }
 
@@ -595,7 +685,7 @@ export class PadEngine {
     }
     this.active.clear();
 
-    const v = new PatternVoice(ctx, this.bus, this.s, timbre, samples, this.r, root, type);
+    const v = new PatternVoice(ctx, this.bus, this.s, timbre, samples, this.r, root, type, bass);
     v.env.gain.value = level;
     v.onEnded = () => this.patterns.delete(v);
     this.patterns.add(v);
@@ -652,7 +742,7 @@ export class PadEngine {
     const bus = ctx.createGain();
     bus.gain.value = 0;
     bus.connect(this.bus);
-    fade(ctx, bus.gain, 1, timbreById(this.s.timbre).oneShot ? 0.01 : this.s.fadeIn);
+    fade(ctx, bus.gain, 1, isStruck(timbreById(this.s.timbre)) ? 0.01 : this.s.fadeIn);
     this.loop = { steps, i: 0, next: ctx.currentTime + 0.05, bus, voices: [], onStep };
     this.ensureTimer();
     this.tick();
@@ -684,15 +774,15 @@ export class PadEngine {
       const samples = timbre.sampleSet ? this.loadedSamples : null;
       let v: Voice;
       if (this.r.mode === 'pad') {
-        v = new PadVoice(ctx, L.bus, this.s, timbre, samples, step.root, step.type, t);
+        v = new PadVoice(ctx, L.bus, this.s, timbre, samples, step.root, step.type, step.bass, t);
       } else {
-        const pv = new PatternVoice(ctx, L.bus, this.s, timbre, samples, this.r, step.root, step.type);
+        const pv = new PatternVoice(ctx, L.bus, this.s, timbre, samples, this.r, step.root, step.type, step.bass);
         pv.next = t; // o padrão recomeça junto com o acorde
         pv.onEnded = () => this.patterns.delete(pv);
         this.patterns.add(pv);
         v = pv;
       }
-      v.enterAt(t);
+      v.enterAt(t, this.r.mode === 'pad' ? (step.beats * 60) / this.r.bpm : 0);
       L.voices.push(v);
     }
     prev?.leaveAt(t);

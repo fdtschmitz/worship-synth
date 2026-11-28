@@ -23,20 +23,33 @@ export const CHORDS: Record<ChordType, ChordDef> = {
 
 export const SPECIAL_TYPES: ChordType[] = ['sus2', 'sus4', 'add9', 'maj7', 'm7', 'dim', 'dim7', '5'];
 
-export function chordLabel(root: number, type: ChordType): string {
-  return NOTE_NAMES[root] + CHORDS[type].label;
+/** Nome do acorde; com `bass` diferente da fundamental, acorde com baixo (ex.: D/F#). */
+export function chordLabel(root: number, type: ChordType, bass?: number): string {
+  const name = NOTE_NAMES[root] + CHORDS[type].label;
+  if (bass === undefined || bass === root) return name;
+  // Terça maior de tom sem bemol é grafada com sustenido (E/G#, B/D#).
+  const sharp = (bass - root + 12) % 12 === 4 && !NOTE_NAMES[root].includes('b');
+  return `${name}/${sharp ? SHARP_NAMES[bass] : NOTE_NAMES[bass]}`;
+}
+const SHARP_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+
+/** Nota grave do acorde: a fundamental uma oitava abaixo ou, com `bass`, essa nota logo acima dela. */
+export function bassNote(root: number, bass?: number): number {
+  let base = 48 + root; // C3 = 48
+  if (root >= 6) base -= 12;
+  return base - 12 + (bass === undefined ? 0 : (bass - root + 12) % 12);
 }
 
 /**
- * Voicing de pad: baixo (fundamental uma oitava abaixo) + tríade/tétrade aberta
- * no registro médio. Tons de F# a B descem uma oitava para manter o timbre
- * uniforme entre todos os acordes.
+ * Voicing de pad: baixo (fundamental uma oitava abaixo, ou o baixo indicado
+ * em inversões) + tríade/tétrade aberta no registro médio. Tons de F# a B
+ * descem uma oitava para manter o timbre uniforme entre todos os acordes.
  */
-export function padVoicing(root: number, type: ChordType): { body: number[]; shimmer: number[] } {
+export function padVoicing(root: number, type: ChordType, bass?: number): { body: number[]; shimmer: number[] } {
   let base = 48 + root; // C3 = 48
   if (root >= 6) base -= 12;
   const iv = CHORDS[type].intervals;
-  const body = [base - 12, ...iv.map((i) => base + i), base + 12];
+  const body = [bassNote(root, bass), ...iv.map((i) => base + i), base + 12];
   // Camada "shimmer": fundamental e quinta duas oitavas acima.
   const shimmer = [base + 24, base + 31];
   return { body, shimmer };
